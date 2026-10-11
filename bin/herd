@@ -717,7 +717,8 @@ def killall(patterns=None, quiet=False):
 def detach_client(terminal_id, timeout=3.0):
     """Stop only the `herdr terminal attach <id>` client(s); the session keeps running."""
     import signal
-    r = subprocess.run(["pgrep", "-f", f"herdr terminal attach {terminal_id}$"], capture_output=True, text=True)
+    # attach runs as `herdr terminal attach <id> --takeover`: match with or without trailing args
+    r = subprocess.run(["pgrep", "-f", f"herdr terminal attach {terminal_id}( |$)"], capture_output=True, text=True)
     pids = [int(x) for x in r.stdout.split()]
     for pid in pids:
         try: os.kill(pid, signal.SIGTERM)
@@ -735,9 +736,17 @@ def detach(name):
     r = recorded(name)
     if not r: return False
     _, p = find(name)
-    detach_client(p["terminal_id"])   # wrapper exits cleanly -> no 'terminate processes?' prompt
-    time.sleep(0.5)
-    if _win_alive(r["wid"]): close_window(r["wid"])
+    detach_client(p["terminal_id"])   # wrapper (exec'd, so the tab's only process) exits cleanly
+    wid = int(r["wid"])
+    for _ in range(60):               # wait until the tab runs nothing -> close without the prompt
+        b = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if exists window id {wid} then get busy of selected tab of window id {wid}'],
+                           capture_output=True, text=True).stdout.strip()
+        if b != "true": break
+        time.sleep(0.05)
+    else:
+        _locked(lambda d: d.pop(name, None)); tile(quiet=True)
+        raise RuntimeError(f"{name}: window still busy; not closing it (session kept)")
+    if _win_alive(wid): close_window(wid)
     _locked(lambda d: d.pop(name, None))
     tile(quiet=True)
     return True
@@ -1180,9 +1189,9 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.4")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.5")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
-        HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
+        HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
@@ -1252,7 +1261,6 @@ def manager():
                 cue = "(click list to end)"
                 room = W - 1 - len(pfx) - (len(cue) + 1 if W - 1 - len(pfx) > len(cue) + 8 else 0)
                 put(py, 0, pfx, curses.A_BOLD)
-                put(py, len(pfx), bc["echo"][-max(0, room):] if room > 0 else "", curses.A_BOLD)
                 if room < W - 1 - len(pfx): put(py, W - 1 - len(cue), cue, C(3))
             elif msg: put(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
             else: put(py, 0, pfx + "click for broadcast", curses.A_DIM)
@@ -1266,7 +1274,7 @@ def manager():
                 put(by + bh - 1, bx, "\u2514" + "\u2500" * (bw - 2) + "\u2518", C(1))
             if bc["focus"]:
                 curses.curs_set(1)
-                try: scr.move(py, min(W - 2, len(pfx) + len(bc["echo"])))
+                try: scr.move(py, len(pfx))
                 except curses.error: pass
             else: curses.curs_set(0)
             scr.refresh()
@@ -1302,10 +1310,6 @@ def manager():
                     fwd.append(t)
                 if fwd:
                     payload = "".join(fwd)
-                    for t in fwd:
-                        if t in ("\r", "\n"): bc["echo"] = ""
-                        elif t in ("\x7f", "\b"): bc["echo"] = bc["echo"][:-1]
-                        elif t.isprintable(): bc["echo"] = (bc["echo"] + t)[-200:]
                     try:
                         ns = send_raw_all(payload.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"), attached_names())
                         bc["n"] = len(ns)
@@ -1346,10 +1350,13 @@ def manager():
                 elif k in (curses.KEY_UP,) or ch == "k": sel -= 1
                 elif ch == "O" and rows:                                   # Enter does nothing in list mode
                     cur = rows[sel]["name"]
-                    if stub_open: open(stub_open, "a").write(cur + "\n")
-                    else: open_(cur, quiet=True, background=True)
-                    sel_seen[0] = None                                 # outline follows right away
-                    msg = f"opened {cur}"; last = 0
+                    if rows[sel]["window"] and not stub_open:           # has a window: detach + close it
+                        msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager()
+                    else:
+                        if stub_open: open(stub_open, "a").write(cur + "\n")
+                        else: open_(cur, quiet=True, background=True)
+                        msg = f"opened {cur}"
+                    sel_seen[0] = None; last = 0                       # outline follows right away
                 elif ch == "A":
                     v = prompt(f"kill ALL {len(rows)} sessions? [y/N] ")
                     if v.lower() == "y":
@@ -1366,8 +1373,6 @@ def manager():
                     sel_seen[0] = None                                 # outline re-follows (or hides while behind)
                 elif ch == "Z" and cur:
                     msg = mgr_zoom(cur, outline); last = 0
-                elif ch == "X" and cur:
-                    msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"
             except Exception as e: msg = f"! {e}"
     os.environ.setdefault("ESCDELAY", "25")

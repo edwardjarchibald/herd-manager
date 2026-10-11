@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.5 - 2026-10-11
+
+### Changed
+- `X` removed. `O` toggles open/detach: a session without a window is opened (non-activating, as before); a session with a window is detached (the session keeps running) and its window is closed. The hint reads `(O) open/detach`.
+- The live broadcast line no longer echoes typed text: just a bright `> ` and the yellow `(click list to end)`.
+
+### Fixed
+- Detach showed Terminal's "terminate running processes… herdr" dialog. The client lookup used `pgrep -f "herdr terminal attach <id>$"`, but windows attach with `--takeover` appended, so nothing matched, the client kept running and closing the window prompted. Detach now matches with or without trailing args, waits until the tab is no longer busy, and only then closes the window. If it stays busy, the window is left open (session kept).
+
 ## 0.5.4 - 2026-10-11
 
 ### Fixed
