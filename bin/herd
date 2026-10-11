@@ -31,7 +31,33 @@ import json, os, re, subprocess, sys, time, fcntl
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 
+_server_checked = []
+
+def server_running():
+    p = subprocess.run(["herdr", "status", "server"], capture_output=True, text=True)
+    return "status: running" in p.stdout
+
+def ensure_server(timeout=8.0):
+    """Start a background `herdr server` if none is running (e.g. right after login).
+    Never starts a duplicate: checks `herdr status` and for an existing `herdr server` process."""
+    if _server_checked: return
+    _server_checked.append(1)
+    if server_running(): return
+    if subprocess.run(["pgrep", "-f", "herdr server$"], capture_output=True).returncode == 0:
+        pass  # a server process exists but isn't answering yet; just wait for it
+    else:
+        logdir = os.path.expanduser("~/.config/herdr"); os.makedirs(logdir, exist_ok=True)
+        with open(os.path.join(logdir, "server-herd.log"), "ab") as log:
+            subprocess.Popen(["herdr", "server"], cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=log, start_new_session=True)
+    end = time.time() + timeout
+    while time.time() < end:
+        if server_running(): return
+        time.sleep(0.2)
+    sys.exit("herd: herdr server did not start (see ~/.config/herdr/server-herd.log)")
+
 def h(*a):
+    ensure_server()
     p = subprocess.run(["herdr", *a], capture_output=True, text=True)
     if p.returncode != 0:
         sys.exit(f"herdr {' '.join(a)} failed: {p.stderr.strip() or p.stdout.strip()}")
@@ -171,28 +197,52 @@ def tile(quiet=False):
         print(f"tile: {len(alive)} herd window(s) tracked, {len(same)} on target display"
               f"{' + manager' if has_mgr else ''}, {changed} moved, {len(dead)} pruned")
 
-def _open_window(shell_cmd, title):
-    """Open one new Terminal window running shell_cmd; return its window id."""
+def _open_window(shell_cmd, title, activate=True):
+    """Open one new Terminal window running shell_cmd; return its window id.
+    Robust after login: if Terminal isn't running, launch it and wait; reuse a default window it
+    created, otherwise let `do script` create one. The id lookup is retried; activate comes last."""
     script = f'''
 tell application "Terminal"
-  if it is running then
-    set t to do script {osa_str(shell_cmd)}
-  else
+  set wasRunning to running
+  if not wasRunning then
     launch
+    repeat 50 times
+      if running then exit repeat
+      delay 0.1
+    end repeat
     delay 0.5
-    set t to do script {osa_str(shell_cmd)} in window 1
   end if
-  set custom title of t to {osa_str(title)}
-  set title displays custom title of t to true
-  set title displays shell path of t to false
-  set title displays window size of t to false
-  set title displays device name of t to false
-  set wid to id of (first window whose selected tab is t)
-  activate
+  if (not wasRunning) and ((count of windows) > 0) then
+    set t to do script {osa_str(shell_cmd)} in window 1
+  else
+    set t to do script {osa_str(shell_cmd)}
+  end if
+  set wid to missing value
+  repeat 30 times
+    try
+      set wid to id of (first window whose selected tab is t)
+      exit repeat
+    end try
+    delay 0.1
+  end repeat
+  if wid is missing value then set wid to id of front window
+  try
+    set custom title of t to {osa_str(title)}
+    set title displays custom title of t to true
+    set title displays shell path of t to false
+    set title displays window size of t to false
+    set title displays device name of t to false
+  end try
   return wid
 end tell'''
-    r = subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
-    return int(r.stdout.strip())
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip().isdigit():
+        raise RuntimeError(f"Terminal AppleScript failed: {(r.stderr or r.stdout).strip()}"
+                           + (" (allow it in System Settings > Privacy & Security > Automation > Terminal)"
+                              if "-1743" in r.stderr else ""))
+    wid = int(r.stdout.strip())
+    if activate: subprocess.run(["osascript", "-e", 'tell application "Terminal" to activate'], capture_output=True)
+    return wid
 
 def _win_alive(wid):
     p = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then return exists window id {int(wid)}'],
@@ -733,4 +783,8 @@ def main(a):
     elif c == "id" and rest: print(find(rest[0])[1]["pane_id"])
     elif c == "app": app()  # used by Herd Terminal.app
     else: print(__doc__); sys.exit(2)
-main(sys.argv[1:])
+try:
+    main(sys.argv[1:])
+except (RuntimeError, subprocess.CalledProcessError) as e:
+    msg_ = getattr(e, "stderr", None) or str(e)
+    sys.exit(f"herd: {msg_.strip() if isinstance(msg_, str) else msg_}")
