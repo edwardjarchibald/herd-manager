@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9 - 2026-10-11
+
+### Fixed
+- F "behind" didn't return to the app you were using (e.g. an Electron app such as Grok Bot). The app was only captured at the moment F was pressed, so after clicking the manager first it was Terminal and nothing was stored. The fallback (a JXA CGWindowList scan) always returned empty because CoreGraphics isn't reachable from JXA. Now the manager poll loop records the last non-Terminal frontmost app about once a second. The fallback uses `lsappinfo visibleProcessList` (front-to-back app order). Activation is verified, with a retry via `open -b <bundle id>`. Set `HERD_DEBUG=1` to log to `~/.cache/herd/focus.log`.
+
 ## 0.2.8 - 2026-10-11
 
 ### Added
