@@ -43,7 +43,7 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 
 | Command | What it does |
 |---|---|
-| `herd new [name]` | Create a session (default: automatic name, see below); prints name, terminal id, pane id |
+| `herd new [DIR\|NAME] [-C DIR]` | Create a session with cwd DIR (`~` expanded, relative to your cwd; default `~`) and an automatic name (ee-<issue> in a worktree, otherwise dev-N). A non-path argument is a manual NAME. Prints name, terminal id, pane id |
 | `herd ls` | List sessions: name, terminal id, pane id, cwd, program (agent name or program basename; never the full command line) |
 | `herd open <name>` | Open (or focus) a tiled Terminal window attached to the session |
 | `herd attach <name>` | What each window runs: attach, then clean up and retile on exit |

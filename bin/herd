@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """herd: one plain Terminal.app window per herdr terminal.
 Name = herdr workspace label (stored in herdr itself; no side file).
-  herd new [name]   create workspace+terminal (default: automatic name), print name + ids
+  herd new [DIR|NAME] [-C DIR]  create workspace+terminal with cwd DIR (default ~) and an automatic name
+                    (ee-<issue> / dev-N); a non-path argument is a manual NAME. Prints name + ids
   herd ls           list name, terminal id, pane id, cwd, foreground command
   herd open <name>  open a Terminal.app window titled <name> running `herdr terminal attach <id>`
   herd kill <name>  close the herdr workspace
@@ -243,18 +244,23 @@ def auto_names(apply=True, ws=None, ps=None):
         for w, new_ in changes: _relabel(w, new_)
     return [(w["label"], n) for w, n in changes]
 
-def new(name=None):
+def new(name=None, cwd=None):
     labels = {w["label"] for w in workspaces()}
     manual = name is not None
     if name is None:
         name = lowest_dev(labels)
     elif not NAME_RE.match(name): sys.exit("name must not contain quotes, $, backslash or control characters")
     elif name in labels: sys.exit(f"{name!r} already exists")
-    r = h("workspace", "create", "--label", name, "--cwd", os.path.expanduser("~"), "--no-focus")
+    r = h("workspace", "create", "--label", name, "--cwd", cwd or os.path.expanduser("~"), "--no-focus")
     p = r["root_pane"]
     if manual:
         wid_ = r["workspace"]["workspace_id"]
         _meta(lambda d: d.__setitem__(wid_, {"manual": True, "label": name}))
+    elif cwd:
+        try:
+            auto_names()                                   # dev-N -> ee-<issue> etc. right away
+            name = next((w["label"] for w in workspaces() if w["workspace_id"] == r["workspace"]["workspace_id"]), name)
+        except SystemExit: pass
     print(f"{name}\t{p['terminal_id']}\t{p['pane_id']}")
     return name
 
@@ -1167,7 +1173,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.2")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.3")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
@@ -1366,7 +1372,19 @@ def manager():
 def main(a):
     if not a or a[0] in ("-h", "--help", "help"): print(__doc__); return
     c, rest = a[0], a[1:]
-    if c == "new": new(rest[0] if rest else None)
+    if c == "new":
+        name = d = None; args = list(rest)
+        while args:
+            a_ = args.pop(0)
+            if a_ == "-C":
+                if not args: sys.exit("herd new: -C needs a directory")
+                d = args.pop(0)
+            elif "/" in a_ or a_.startswith(("~", ".")) or os.path.isdir(a_): d = a_
+            else: name = a_
+        if d is not None:
+            d = os.path.abspath(os.path.expanduser(d))
+            if not os.path.isdir(d): sys.exit(f"herd new: no such directory: {d}")
+        new(name, d)
     elif c == "ls": ls()
     elif c == "open" and rest: open_(rest[0])
     elif c == "kill" and rest: kill(rest[0])

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3 - 2026-10-11
+
+### Added
+- `herd new [DIR] [-C DIR]` starts the session in DIR. `~` is expanded and relative paths resolve against the current directory; a missing DIR is a clear error. It is auto-named right away (ee-<issue> in a worktree, otherwise dev-N). A bare word that isn't a path or existing directory is still a manual NAME, as before.
+
 ## 0.5.2 - 2026-10-11
 
 ### Changed
