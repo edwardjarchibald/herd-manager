@@ -716,6 +716,7 @@ class Outline:
         self.t = time.time()
         r = _locked(lambda d: d.get(name)) if name else None
         if not r: self._send("hide"); return
+        if force: raise_behind_manager(r["wid"])
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
@@ -725,6 +726,16 @@ class Outline:
             try: self.p.stdin.close()
             except OSError: pass
             self.p = None
+
+def raise_behind_manager(wid):
+    """Bring a herd window to the top of Terminal's own window stack while the manager stays the
+    front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
+    Doesn't activate Terminal, so windows of other apps that are in front stay in front."""
+    m = _locked(lambda d: d.get(MGR))
+    lines = [f"  set index of window id {int(wid)} to 1"]
+    if m: lines.append(f"  set index of window id {int(m['wid'])} to 1")
+    subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
+                   capture_output=True)
 
 def manager():
     import curses, signal

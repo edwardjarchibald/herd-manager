@@ -36,30 +36,35 @@ panel.isOpaque = false
 panel.backgroundColor = .clear
 panel.hasShadow = false
 panel.ignoresMouseEvents = true
-panel.level = .floating
-panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+panel.level = .normal          // normal level, ordered directly above the target Terminal window
+panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
 panel.contentView = BorderView()
 
 var target: CGRect? = nil   // top-left coords
 
-func terminalWindowOnScreen(_ r: CGRect) -> Bool {
-    guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
+/// CGWindowID of the on-screen Terminal window (layer 0) with these bounds, or nil.
+/// Uses owner PID/name and bounds only (no screen-recording permission needed).
+func terminalWindowID(_ r: CGRect) -> CGWindowID? {
+    guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+    let termPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").map { $0.processIdentifier })
     for w in info {
-        guard (w[kCGWindowOwnerName as String] as? String) == "Terminal",
-              let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+        guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, termPIDs.contains(pid),
+              (w[kCGWindowLayer as String] as? Int) == 0,
+              let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+              let num = w[kCGWindowNumber as String] as? CGWindowID else { continue }
         let wr = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
-        if abs(wr.minX - r.minX) <= 4 && abs(wr.minY - r.minY) <= 4 && abs(wr.width - r.width) <= 6 && abs(wr.height - r.height) <= 6 { return true }
+        if abs(wr.minX - r.minX) <= 4 && abs(wr.minY - r.minY) <= 4 && abs(wr.width - r.width) <= 6 && abs(wr.height - r.height) <= 6 { return num }
     }
-    return false
+    return nil
 }
 
 func refresh() {
-    guard let r = target, terminalWindowOnScreen(r), let main = NSScreen.screens.first else { panel.orderOut(nil); return }
+    guard let r = target, let wid = terminalWindowID(r), let main = NSScreen.screens.first else { panel.orderOut(nil); return }
     let pad: CGFloat = border
     let frame = NSRect(x: r.minX - pad, y: main.frame.height - r.maxY - pad, width: r.width + 2 * pad, height: r.height + 2 * pad)
     panel.setFrame(frame, display: true)
     panel.contentView?.needsDisplay = true
-    panel.orderFrontRegardless()
+    panel.order(.above, relativeTo: Int(wid))   // directly above the target: apps in front still cover it
 }
 
 DispatchQueue.global().async {
@@ -74,4 +79,8 @@ DispatchQueue.global().async {
     DispatchQueue.main.async { exit(0) }
 }
 Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in refresh() }
+// Re-assert ordering promptly when the user switches apps (window order changes).
+NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
+    refresh(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { refresh() }
+}
 app.run()

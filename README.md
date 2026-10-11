@@ -85,8 +85,10 @@ The selected session's own Terminal window gets a 9px outline in the highlight b
 ANSI cyan, 51/187/200), hugging the window's rounded corners (16pt on macOS 26, 10pt before;
 override with `HERD_OUTLINE_PX`, `HERD_OUTLINE_RADIUS`, `HERD_OUTLINE_RGB`), drawn by a tiny helper
 (`helper/herd-outline.swift`, compiled with `swiftc` into `~/.cache/herd` on first use; skipped if
-swiftc isn't available). It's a borderless, click-through, non-activating overlay that never takes
-focus and needs no Accessibility permission. It follows the window's bounds about once a second, hides
+swiftc isn't available). It's a borderless, click-through, non-activating overlay at the normal window level, kept directly
+above the selected Terminal window (apps in front of that window also cover the outline). Selecting a
+session also raises its window within Terminal (behind the manager) without stealing focus. It needs
+no Accessibility permission. It follows the window's bounds about once a second, hides
 when that window isn't on screen (another Space, minimized, under a fullscreen app), and exits with the
 manager. Set `HERD_NO_OUTLINE=1` to disable it.
 

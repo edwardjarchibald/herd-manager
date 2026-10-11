@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 (2026-10-11)
+
+- Outline overlay now lives at the normal window level, ordered directly above the selected
+  Terminal window (found by Terminal's PID + bounds via CGWindowList), so other apps in front cover
+  it. Ordering is re-asserted every 0.5 s and on app switches.
+- Selecting a session raises its window to the top of Terminal's own stack (just behind the
+  manager) without activating Terminal; the manager keeps keyboard focus.
+
 ## 0.2.1 (2026-10-11)
 
 - Default session name is now a stable `dev-<N>` (lowest free number, never renumbered); only
