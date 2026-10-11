@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5 - 2026-10-11
+
+### Added
+- Manager key `Z` (and `herd zoom <name>`): toggles zoom on the selected session's window. It is raised without activating Terminal and sized to ~80% of the grid area, centered. The state is stored in windows.json. Retiles keep the zoomed window on top and tile the others underneath. Z again, or Z on another session, unzooms. The outline follows it, and a session without a window shows "not attached".
+
 ## 0.2.4 - 2026-10-11
 
 ### Fixed

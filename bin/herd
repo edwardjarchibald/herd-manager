@@ -381,13 +381,21 @@ def tile(quiet=False):
     order = sorted((n for n in alive if n != MGR), key=lambda n: alive[n]["created"])
     newest = order[-1] if order else MGR
     target = screen_of(win(newest)) or q["screens"][0]
-    same = [n for n in order if screen_of(win(n)) == target]
+    zoomed = next((n for n in order if alive[n].get("zoom")), None)
+    same = [n for n in order if n != zoomed and screen_of(win(n)) == target]
     has_mgr = MGR in alive and (not order or screen_of(win(MGR)) in (target, None))
     mrect, rects = layout(*target, len(same), manager=has_mgr)
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
+    if zoomed:   # ~80% of the grid area (right of the manager), centered
+        x, y, w, h = target
+        if has_mgr: x, w = x + GAP + MGR_W, w - GAP - MGR_W
+        zw, zh = round(w * 0.8), round(h * 0.8)
+        l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
+        moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
     _jxa(JXA_SET, moves)
+    if zoomed: raise_behind_manager(alive[zoomed]["wid"])      # zoomed stays on top of Terminal's stack
     if not quiet:
         print(f"tile: {len(alive)} herd window(s) tracked, {len(same)} on target display"
               f"{' + manager' if has_mgr else ''}, {changed} moved, {len(dead)} pruned")
@@ -802,6 +810,18 @@ class Outline:
             except OSError: pass
             self.p = None
 
+def zoom(name):
+    """Toggle zoom on session `name`'s window (at most one zoomed). Returns 'on'/'off', or None if no window."""
+    r = recorded(name)
+    if not r: return None
+    was = bool(r.get("zoom"))
+    def f(d):
+        for k, v in d.items():
+            if k != MGR: v.pop("zoom", None)
+        if not was and name in d: d[name]["zoom"] = True
+    _locked(f); tile(quiet=True)
+    return "off" if was else "on"
+
 def raise_behind_manager(wid):
     """Bring a herd window to the top of Terminal's own window stack while the manager stays the
     front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
@@ -895,7 +915,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        HELP = ["N new", "click > for live broadcast", "click list to exit", "\u23ce open", "X detach", "K kill", "A kill all",
+        HELP = ["N new", "click > for live broadcast", "click list to exit", "\u23ce open", "X detach", "Z zoom", "K kill", "A kill all",
                 "H hide help", "Q quit", "click select"]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
@@ -1052,6 +1072,10 @@ def manager():
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
+                elif ch == "Z" and cur:
+                    z = zoom(cur); msg = f"{cur}: not attached" if z is None else f"zoom {z}: {cur}"
+                    refocus_manager(); last = 0
+                    if outline: outline.follow(cur, force=True)
                 elif ch == "X" and cur:
                     msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"
@@ -1072,6 +1096,7 @@ def main(a):
     elif c == "killall": killall([x for x in rest if x != "--all"] or None)
     elif c == "copy" and rest: print(f"copied {copy_session(rest[0])} lines")
     elif c == "paste" and rest: print(f"pasted {paste_session(rest[0])} chars")
+    elif c == "zoom" and rest: print({"on": "zoomed", "off": "unzoomed"}.get(zoom(rest[0]), "not attached"))
     elif c == "detach" and rest: print("detached" if detach(rest[0]) else "not attached")
     elif c == "cleanclip": print(f"cleanclip: removed {clean_clip()} padding chars")
     elif c == "broadcast" and rest:

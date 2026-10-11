@@ -48,6 +48,7 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 | `herd open <name>` | Open (or focus) a tiled Terminal window attached to the session |
 | `herd attach <name>` | What each window runs: attach, then clean up and retile on exit |
 | `herd detach <name>` | Close the session's window but keep the session running |
+| `herd zoom <name>` | Toggle zoom on the session's window |
 | `herd kill <name>` | Kill a session and close its window |
 | `herd killall [GLOB…]` | Kill **all** herdr sessions, or only names matching any glob (`'dev*'`). No confirmation |
 | `herd tile` | Retile herd windows now |
@@ -72,6 +73,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | `Enter` | Open the session (tiled) or raise its window, without activating Terminal; the manager keeps focus |
 | `N` | New session and window (also without activating Terminal) |
 | `X` | Detach: close the window, keep the session |
+| `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
 | `H` | Hide/show the key reminder |
