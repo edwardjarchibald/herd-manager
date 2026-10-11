@@ -68,13 +68,13 @@ With the dock on (the default), the left panel is max(30% of the tiled width, `d
 row of a 3-row grid) and the dock below it. Terminals tile adaptively in the area to the right:
 
 ```
-+---------+------+------+------+      terminals:  1 full   2 = 2 cols   3 = 3 cols
-| manager |  t1  |  t4  |  t7  |                  4 = 2x2  5-6 = 3x2    7-9 = 3x3
-+---------+------+------+------+                  >9 = 4 cols x ceil(n/4) rows
-|         |  t2  |  t5  |  t8  |      partial grids: the last column(s) get one cell
-|  dock   +------+------+------+      fewer, spanning the height (5: last column full
-|         |  t3  |  t6  |  t9  |      height; 7: last two columns in halves; 8: last
-+---------+------+------+------+      column in halves)
++---------+------+------+------+
+| manager |  t1  |  t4  |  t7  |      terminals (rows of cells):
++---------+------+------+------+        1 = full    2 = 2 columns   3 = 2 + 1 (full width)
+|         |  t2  |  t5  |  t8  |        4 = 2x2     5 = 2 + 2 + 1   6 = 3 rows x 2
+|  dock   +------+------+------+        7+ = 3 rows, a new column per 3 terminals, filled top to
+|         |  t3  |  t6  |  t9  |        bottom; a partly filled last column's cells share its height
++---------+------+------+------+        (9 shown; 10+ = 4 columns, ...)
 ```
 
 Z zooms to 80% of the terminal area, centered. The manager lists one line per session and picks the

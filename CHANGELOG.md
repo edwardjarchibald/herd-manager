@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 - 2026-10-11
+
+### Changed
+- New dock-mode terminal tiling order:
+  - 1 = full area; 2 = two full-height columns; 3 = 2 cells on top, 1 full-width cell below; 4 = 2x2.
+  - 5 = 3 rows (2, 2, 1 full width); 6 = 3x2.
+  - 7+: 3 rows, with columns added one at a time and filled top to bottom. The cells of a partly filled last column share its full height (7: one full-height cell, 8: two halves). 10+ uses 4 columns, and so on.
+- Dock-off tiling is unchanged.
+
 ## 0.5.1 - 2026-10-11
 
 ### Changed
