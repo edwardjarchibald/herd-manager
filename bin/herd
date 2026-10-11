@@ -166,10 +166,17 @@ def tilde(path):
 def desired_name(cwd):
     """Session name: '<prefix>-<issue>' in a linked worktree with an issue number, else dev-<N>."""
     if not cwd: return DEV
+    try: cwd = os.path.realpath(cwd)                 # ~/git -> ~/Development/git etc.
+    except OSError: pass
     g = git_info(cwd)
     if g and g["linked"]:
         n = issue_number(g["branch"], os.path.basename(g["toplevel"]))
         if n: return f"{repo_prefix(g)}-{n}"
+    # Fallback by path: .../worktrees/<repo>/<anything>issue-<N>[/...] even when git doesn't see a worktree
+    # there (e.g. a removed/unregistered worktree folder, or a non-git subfolder of one).
+    m = re.search(r"/worktrees/([^/]+)/[^/]*?issues?[-_]?(\d+)(?:/|$)", cwd, re.I)
+    if m and not g:
+        return f"{repo_prefix({'origin': '', 'repo': m.group(1)})}-{m.group(2)}"
     return DEV                                          # everything else: a stable dev-<N>
 
 DEV = "\0dev"   # sentinel: assign a stable dev-<N>
@@ -1173,7 +1180,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.3")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.4")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4 - 2026-10-11
+
+### Fixed
+- A session that cd'd into `~/git/worktrees/elephant_ears_V1/elephant_ears_V1-issue-1148` stayed `dev-1`. Auto-naming does re-run on every manager poll, but it only recognized issue worktrees through git, and that folder is not a git worktree: git does not list it, and it only contains an `elephant-ears-website` subfolder. Naming now uses the realpath of the cwd (so `~/git` -> `~/Development/git` symlinks don't matter). Outside git, a path matching `.../worktrees/<repo>/…issue-<N>` names the session `<prefix>-<N>`. Only auto-named sessions are renamed, never manual names.
+
 ## 0.5.3 - 2026-10-11
 
 ### Added
