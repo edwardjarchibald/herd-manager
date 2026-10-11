@@ -272,15 +272,44 @@ def osa_str(s): return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 GAP = 8
 WINFILE = os.path.expanduser("~/.config/herd/windows.json")
 
+def _sess_map():
+    """(label -> terminal id, terminal id -> label, workspace id -> terminal id) for live sessions."""
+    try:
+        ws = {w["workspace_id"]: w["label"] for w in workspaces()}
+        l2t, t2l, w2t = {}, {}, {}
+        for p in panes():
+            if p["workspace_id"] in ws and p.get("terminal_id"):
+                l2t[ws[p["workspace_id"]]] = p["terminal_id"]; t2l[p["terminal_id"]] = ws[p["workspace_id"]]
+                w2t[p["workspace_id"]] = p["terminal_id"]
+        return l2t, t2l, w2t
+    except SystemExit:
+        return {}, {}, {}
+
 def _locked(fn):
+    """windows.json is stored keyed by herdr TERMINAL ID (stable across renames). fn gets a view keyed
+    by the current session name (records of vanished sessions appear as '#<terminal id>'), so names
+    can change freely without breaking records. Old name-keyed files are migrated on the fly."""
     os.makedirs(os.path.dirname(WINFILE), exist_ok=True)
     with open(WINFILE + ".lock", "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
-        try: d = json.load(open(WINFILE))
-        except Exception: d = {}
-        r = fn(d)
-        tmp = WINFILE + ".tmp"; json.dump(d, open(tmp, "w"), indent=1); os.replace(tmp, WINFILE)
-        return r
+        try: disk = json.load(open(WINFILE))
+        except Exception: disk = {}
+        l2t, t2l, w2t = _sess_map()
+        view = {}
+        for k, r in disk.items():
+            if k == MGR: view[k] = r; continue
+            tid = r.get("tid") or (k if k.startswith("term_") else None) or w2t.get(r.get("ws")) or l2t.get(k)
+            if not tid: continue                                   # unresolvable legacy record: drop
+            r = dict(r, tid=tid)
+            view[t2l.get(tid, "#" + tid)] = r
+        res = fn(view)
+        out = {}
+        for k, r in view.items():
+            if k == MGR: out[k] = r; continue
+            tid = r.get("tid") or (k[1:] if k.startswith("#") else l2t.get(k))
+            if tid: out[tid] = dict(r, tid=tid, name=t2l.get(tid, r.get("name", k)))
+        tmp = WINFILE + ".tmp"; json.dump(out, open(tmp, "w"), indent=1); os.replace(tmp, WINFILE)
+        return res
 
 def grid(x, y, w, h, n, gap=GAP):
     """Even grid: 1-3 -> n columns; 4 -> 2x2; 5-9 -> 3 columns; >9 -> ceil(sqrt(n)) columns.
@@ -446,6 +475,18 @@ JXA_REFRONT = """ObjC.import('AppKit');
 function run(argv){ var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(argv[0]));
   if (!a.isNil()) a.activateWithOptions($.NSApplicationActivateIgnoringOtherApps); return 'ok'; }"""
 
+def orphan_window(label):
+    """Id of a Terminal window whose custom title is exactly `label` and that no record claims."""
+    claimed = {r["wid"] for r in _locked(lambda d: dict(d)).values()}
+    r = subprocess.run(["osascript", "-l", "JavaScript", "-e",
+        "var T=Application('Terminal'); T.running() ? JSON.stringify(T.windows().map(function(w){try{return [w.id(), w.selectedTab().customTitle()]}catch(e){return [0,'']}})) : '[]'"],
+        capture_output=True, text=True)
+    try:
+        for wid, title in json.loads(r.stdout or "[]"):
+            if title == label and wid and wid not in claimed: return wid
+    except ValueError: pass
+    return None
+
 def frontmost_pid():
     r = subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_FRONT], capture_output=True, text=True)
     return r.stdout.strip()
@@ -461,11 +502,23 @@ def open_(name, quiet=False, keep_manager_focus=False, background=False):
         if background: raise_behind_manager(r["wid"])
         else: focus_window(r["wid"])
         return
-    w_, _ = find(name); name = w_["label"]
+    w_, p_ = find(name); name = w_["label"]
+    orphan = orphan_window(name)
+    if orphan:   # a herd window for this session exists but its record was lost: adopt it
+        _locked(lambda d: d.__setitem__(name, {"wid": orphan, "created": time.time(), "role": "session",
+                                                "ws": w_["workspace_id"], "tid": p_["terminal_id"]}))
+        tile(quiet=quiet)
+        if background: raise_behind_manager(orphan)
+        else: focus_window(orphan)
+        return
     before = frontmost_pid() if background else ""
     wid = _open_window(f"clear; exec {shlex.quote(os.path.abspath(sys.argv[0]))} attach {shlex.quote(w_['workspace_id'])}",
                        name, activate=not background)
-    _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session", "ws": w_["workspace_id"]}))
+    _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session",
+                                            "ws": w_["workspace_id"], "tid": p_["terminal_id"]}))
+    time.sleep(0.8)
+    if not _win_alive(wid):
+        raise RuntimeError(f"the window for {name} closed right after opening (attach failed?)")
     tile(quiet=quiet)
     if background:
         raise_behind_manager(wid)                       # manager back on top of Terminal's stack (key)
@@ -481,7 +534,7 @@ def attach(name):
         ws_id = name; p = next(x for x in panes() if x["workspace_id"] == ws_id)   # attach by workspace id
     else:
         w_, p = find(name); ws_id = w_["workspace_id"]
-    child = subprocess.Popen(["herdr", "terminal", "attach", p["terminal_id"]])
+    child = subprocess.Popen(["herdr", "terminal", "attach", p["terminal_id"], "--takeover"])
     done = []
     def cleanup(*_):
         if done: return

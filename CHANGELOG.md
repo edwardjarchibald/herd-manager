@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.4 - 2026-10-11
+
+### Fixed
+- Enter on a session whose herd window had lost its record (e.g. `dev-4`, renamed from `git`) only retiled and showed nothing. Records were keyed by session name, and an old window's exit cleanup removed the record under a name that by then belonged to another session. The new window's attach then lost to the still-attached orphan window and closed at once.
+- `windows.json` is now keyed by herdr terminal id, so renames never break records. Old files migrate automatically.
+- Opening a session whose orphaned herd window still exists adopts that window and brings it forward instead of opening a duplicate.
+- New windows attach with `--takeover`. A window that closes right after opening now shows an error in the manager status line.
+
 ## 0.2.3 (2026-10-11)
 
 - Removed double-click-to-open; a single click selects.
