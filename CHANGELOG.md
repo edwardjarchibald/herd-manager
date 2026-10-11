@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 - 2026-10-11
+
+### Fixed
+- herd-dock crashed (integer conversion trap) on the first mouse-down while the dock was empty, so the outline and docking never ran.
+
 ## 0.4.0 - 2026-10-11
 
 ### Added

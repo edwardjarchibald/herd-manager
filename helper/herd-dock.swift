@@ -115,7 +115,7 @@ func tick() {
     let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
     // a window being dragged = its frame changed since the last tick while the button is down
     if mouseDown {
-        for (id, (r, pid)) in now where id != CGWindowID(docked["wid"] as? Int ?? -1) {
+        for (id, (r, pid)) in now where Int(id) != (docked["wid"] as? Int ?? -1) {
             if let old = last[id], old != r { cand = id; candPID = pid; candSince = Date(); candFrame = r }
         }
     }
