@@ -1,0 +1,736 @@
+#!/usr/bin/env python3
+"""herd: one plain Terminal.app window per herdr terminal.
+Name = herdr workspace label (stored in herdr itself; no side file).
+  herd new [name]   create workspace+terminal (default next free dev-N), print name + ids
+  herd ls           list name, terminal id, pane id, cwd, foreground command
+  herd open <name>  open a Terminal.app window titled <name> running `herdr terminal attach <id>`
+  herd kill <name>  close the herdr workspace
+  herd id <name>    print pane id (for herdr pane read/run)
+  herd tile         retile herd-created Terminal windows (even grid) on the newest one's display
+  herd untile       placeholder (no-op)
+  herd attach <name> (used inside herd windows) attach + clean up/retile on exit
+  herd killall [GLOB...]  kill ALL herdr sessions (herd + external), or only names matching any glob; --all = no args
+  herd detach <name> close the session's herd window, keep the session running
+  herd broadcast '<text>'  run text+Enter in every session with an open herd window
+  herd cleanclip    strip trailing padding spaces from the clipboard (after Cmd-C in an attach window)
+  herd copy <name>  copy the session's full output to the clipboard (pbcopy)
+  herd paste <name> paste the clipboard into the session as text, no Enter
+  herd manager      curses session manager (run inside its own Terminal window)
+  herd manager --window   open/focus the manager window (left column of the tiling area)
+Only Terminal windows recorded in ~/.config/herd/windows.json are ever moved.
+
+Test hooks (environment variables, for headless testing of `herd manager`; unset in normal use):
+  HERD_TEST_SANDBOX=<log>   fake session rows; every mutating action is only logged to <log>
+  HERD_TEST_ROWS=<n>        number of fake rows in sandbox mode (default 6)
+  HERD_TEST_STATE=<file>    write selection/focus/help state after each frame
+  HERD_TEST_DUMP=<file>     write a plain-text dump of the screen after each frame
+  HERD_TEST_KEYLOG=<file>   append the last key code after each frame
+  HERD_TEST_STUB_OPEN=<f>   log Enter/double-click opens instead of opening windows
+"""
+import json, os, re, subprocess, sys, time, fcntl
+os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
+
+def h(*a):
+    p = subprocess.run(["herdr", *a], capture_output=True, text=True)
+    if p.returncode != 0:
+        sys.exit(f"herdr {' '.join(a)} failed: {p.stderr.strip() or p.stdout.strip()}")
+    return json.loads(p.stdout)["result"] if p.stdout.strip() else {}
+
+def workspaces(): return h("workspace", "list")["workspaces"]
+def panes(): return h("pane", "list")["panes"]
+
+def find(name):
+    for w in workspaces():
+        if w["label"] == name:
+            ps = [p for p in panes() if p["workspace_id"] == w["workspace_id"]]
+            if not ps: sys.exit(f"{name}: workspace has no panes")
+            return w, ps[0]
+    sys.exit(f"no herd session named {name!r} (see `herd ls`)")
+
+def new(name=None):
+    labels = {w["label"] for w in workspaces()}
+    if name is None:
+        n = 1
+        while f"dev-{n}" in labels: n += 1
+        name = f"dev-{n}"
+    elif not NAME_RE.match(name): sys.exit("name must be [A-Za-z0-9._-], max 41 chars")
+    elif name in labels: sys.exit(f"{name!r} already exists")
+    r = h("workspace", "create", "--label", name, "--cwd", os.path.expanduser("~"),
+          "--env", f"HERD_SESSION={name}", "--no-focus")
+    p = r["root_pane"]
+    print(f"{name}\t{p['terminal_id']}\t{p['pane_id']}")
+    return name
+
+def ls():
+    ws = {w["workspace_id"]: w["label"] for w in workspaces()}
+    print(f"{'NAME':28} {'TERMINAL_ID':20} {'PANE':7} {'CWD':45} COMMAND")
+    for p in panes():
+        if p["workspace_id"] not in ws: continue
+        cmd = p.get("agent") or ""
+        try:
+            fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
+            cmd = " ".join(x.get("cmdline", x.get("name", "")) for x in fp) + (f" [agent:{p['agent']}]" if p.get("agent") else "")
+        except SystemExit: pass
+        cwd = (p.get("foreground_cwd") or p.get("cwd", "")).replace(os.path.expanduser("~"), "~", 1)
+        print(f"{ws[p['workspace_id']]:28} {p.get('terminal_id',''):20} {p['pane_id']:7} {cwd:45} {cmd}")
+
+def osa_str(s): return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+GAP = 8
+WINFILE = os.path.expanduser("~/.config/herd/windows.json")
+
+def _locked(fn):
+    os.makedirs(os.path.dirname(WINFILE), exist_ok=True)
+    with open(WINFILE + ".lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try: d = json.load(open(WINFILE))
+        except Exception: d = {}
+        r = fn(d)
+        tmp = WINFILE + ".tmp"; json.dump(d, open(tmp, "w"), indent=1); os.replace(tmp, WINFILE)
+        return r
+
+def grid(x, y, w, h, n, gap=GAP):
+    """Even grid: 1-3 -> n columns; 4 -> 2x2; 5-9 -> 3 columns; >9 -> ceil(sqrt(n)) columns.
+    Rows = ceil(n/cols); a partial last row widens to fill. Returns [(l, t, r, b)] top-left coords."""
+    import math
+    if n <= 0: return []
+    cols = n if n <= 3 else 2 if n == 4 else 3 if n <= 9 else math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    x, y, w, h = x + gap, y + gap, w - 2 * gap, h - 2 * gap
+    rh = (h - gap * (rows - 1)) / rows
+    out = []
+    for r in range(rows):
+        k = min(cols, n - r * cols)
+        cw = (w - gap * (k - 1)) / k
+        top = y + r * (rh + gap)
+        for c in range(k):
+            left = x + c * (cw + gap)
+            out.append((round(left), round(top), round(left + cw), round(top + rh)))
+    return out
+
+JXA_QUERY = r"""
+ObjC.import('AppKit');
+function run(argv){
+  var ids = JSON.parse(argv[0]), T = Application('Terminal'), res = {screens: [], windows: {}};
+  var s = $.NSScreen.screens, mainH = s.objectAtIndex(0).frame.size.height;
+  for (var i = 0; i < s.count; i++) { var v = s.objectAtIndex(i).visibleFrame;
+    // NSScreen: bottom-left origin, y up. Terminal bounds: top-left of main screen, y down.
+    res.screens.push([v.origin.x, mainH - (v.origin.y + v.size.height), v.size.width, v.size.height]); }
+  if (T.running()) ids.forEach(function(id){ try { var b = T.windows.byId(id).bounds();
+      res.windows[id] = [b.x, b.y, b.x + b.width, b.y + b.height]; } catch(e) {} });
+  return JSON.stringify(res);
+}"""
+JXA_SET = r"""
+function run(argv){
+  var T = Application('Terminal'), m = JSON.parse(argv[0]);
+  for (var id in m) { try { var r = m[id];
+      T.windows.byId(parseInt(id)).bounds = {x: r[0], y: r[1], width: r[2]-r[0], height: r[3]-r[1]}; } catch(e) {} }
+  return "ok";
+}"""
+
+def _jxa(src, arg):
+    p = subprocess.run(["osascript", "-l", "JavaScript", "-e", src, json.dumps(arg)], capture_output=True, text=True)
+    if p.returncode: sys.exit("osascript: " + p.stderr.strip())
+    return p.stdout.strip()
+
+MGR = "__manager__"   # windows.json key for the manager window (role: manager)
+MGR_W = 520
+
+def layout(x, y, w, h, n, manager=False, gap=GAP):
+    """Manager column (fixed MGR_W, full height, top-left) + even grid in the rest."""
+    if not manager: return None, grid(x, y, w, h, n, gap)
+    m = (x + gap, y + gap, x + gap + MGR_W, y + h - gap)
+    return m, grid(x + gap + MGR_W, y, w - gap - MGR_W, h, n, gap)
+
+def tile(quiet=False):
+    recs = _locked(lambda d: dict(d))
+    if not recs: return
+    q = json.loads(_jxa(JXA_QUERY, [r["wid"] for r in recs.values()]))
+    alive = {n: r for n, r in recs.items() if str(r["wid"]) in q["windows"]}
+    dead = set(recs) - set(alive)
+    if dead: _locked(lambda d: [d.pop(n, None) for n in dead])
+    if not alive: return
+    def screen_of(b):
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        for sc in q["screens"]:
+            if sc[0] <= cx < sc[0] + sc[2] and sc[1] <= cy < sc[1] + sc[3]: return sc
+        return None
+    win = lambda n: q["windows"][str(alive[n]["wid"])]
+    order = sorted((n for n in alive if n != MGR), key=lambda n: alive[n]["created"])
+    newest = order[-1] if order else MGR
+    target = screen_of(win(newest)) or q["screens"][0]
+    same = [n for n in order if screen_of(win(n)) == target]
+    has_mgr = MGR in alive and (not order or screen_of(win(MGR)) in (target, None))
+    mrect, rects = layout(*target, len(same), manager=has_mgr)
+    moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
+    if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
+    changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
+    _jxa(JXA_SET, moves)
+    if not quiet:
+        print(f"tile: {len(alive)} herd window(s) tracked, {len(same)} on target display"
+              f"{' + manager' if has_mgr else ''}, {changed} moved, {len(dead)} pruned")
+
+def _open_window(shell_cmd, title):
+    """Open one new Terminal window running shell_cmd; return its window id."""
+    script = f'''
+tell application "Terminal"
+  if it is running then
+    set t to do script {osa_str(shell_cmd)}
+  else
+    launch
+    delay 0.5
+    set t to do script {osa_str(shell_cmd)} in window 1
+  end if
+  set custom title of t to {osa_str(title)}
+  set title displays custom title of t to true
+  set title displays shell path of t to false
+  set title displays window size of t to false
+  set title displays device name of t to false
+  set wid to id of (first window whose selected tab is t)
+  activate
+  return wid
+end tell'''
+    r = subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
+    return int(r.stdout.strip())
+
+def _win_alive(wid):
+    p = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then return exists window id {int(wid)}'],
+                       capture_output=True, text=True)
+    return p.stdout.strip() == "true"
+
+def focus_window(wid):
+    """Bring ONE recorded herd window to the front."""
+    subprocess.run(["osascript", "-e", f'''tell application "Terminal"
+  set index of window id {int(wid)} to 1
+  activate
+end tell'''], capture_output=True)
+
+def refocus_manager():
+    """Make the recorded manager window frontmost/key again (only that window)."""
+    r = _locked(lambda d: d.get(MGR))
+    if r: focus_window(r["wid"])
+
+def close_window(wid):
+    subprocess.run(["osascript", "-e", f'tell application "Terminal" to close window id {int(wid)} saving no'], capture_output=True)
+
+def recorded(name):
+    r = _locked(lambda d: d.get(name))
+    return r if r and _win_alive(r["wid"]) else None
+
+def manager_window(tile_after=True):
+    r = recorded(MGR)
+    if r: focus_window(r["wid"]); return
+    wid = _open_window(f"clear; exec {os.path.abspath(sys.argv[0])} manager", "herd manager")
+    _locked(lambda d: d.__setitem__(MGR, {"wid": wid, "created": time.time(), "role": "manager"}))
+    if tile_after: tile(quiet=True)
+
+def open_(name, quiet=False, keep_manager_focus=False):
+    find(name)
+    r = recorded(name)
+    if r: focus_window(r["wid"]); return
+    wid = _open_window(f"clear; exec {os.path.abspath(sys.argv[0])} attach {name}", name)
+    _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session"}))
+    tile(quiet=quiet)
+    if keep_manager_focus: refocus_manager()
+
+def attach(name):
+    """Runs inside the herd window. Not exec'd so cleanup runs on detach or on
+    window close (SIGHUP/TERM), then retiles the remaining windows in the background."""
+    import signal
+    _, p = find(name)
+    child = subprocess.Popen(["herdr", "terminal", "attach", p["terminal_id"]])
+    done = []
+    def cleanup(*_):
+        if done: return
+        done.append(1)
+        try: _locked(lambda d: d.pop(name, None))
+        except Exception: pass
+        subprocess.Popen(["nohup", os.path.abspath(sys.argv[0]), "tile"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    def on_sig(*_):
+        cleanup(); 
+        try: child.terminate()
+        except Exception: pass
+        os._exit(0)
+    for sg in (signal.SIGHUP, signal.SIGTERM): signal.signal(sg, on_sig)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C goes to the attached terminal, not us
+    child.wait()
+    cleanup()
+
+def kill(name, quiet=False):
+    w, _ = find(name)
+    r = recorded(name)
+    h("workspace", "close", w["workspace_id"])   # attach exits -> its own cleanup + retile
+    if r:
+        time.sleep(0.4); close_window(r["wid"])     # only that recorded herd window
+        _locked(lambda d: d.pop(name, None)); tile(quiet=True)
+    if not quiet: print(f"closed {name}")
+
+def is_herd(label, recs):
+    return label in recs or label.startswith("dev-") or label.startswith("test-")
+
+def select_targets(labels, patterns=None):
+    """Pure: which session names a killall would kill. No patterns -> all; else fnmatch any."""
+    import fnmatch
+    if not patterns: return list(labels)
+    return [l for l in labels if any(fnmatch.fnmatchcase(l, p) for p in patterns)]
+
+def killall(patterns=None, quiet=False):
+    """Kill herdr workspaces: all of them (no patterns) or those matching any glob.
+    Closes only their recorded herd windows (never the manager), then retiles once."""
+    recs = _locked(lambda d: dict(d))
+    ws = workspaces()
+    targets = set(select_targets([w["label"] for w in ws], patterns))
+    killed = []
+    for w in ws:
+        if w["label"] in targets:
+            h("workspace", "close", w["workspace_id"]); killed.append(w["label"])
+    if killed:
+        time.sleep(0.4)
+        for lab in killed:
+            r = recs.get(lab)
+            if r and lab != MGR and _win_alive(r["wid"]): close_window(r["wid"])
+        _locked(lambda d: [d.pop(l, None) for l in killed if l != MGR])
+        tile(quiet=True)
+    if not quiet: print("killed: " + (", ".join(killed) if killed else "(none)"))
+    return killed
+
+def detach_client(terminal_id, timeout=3.0):
+    """Stop only the `herdr terminal attach <id>` client(s); the session keeps running."""
+    import signal
+    r = subprocess.run(["pgrep", "-f", f"herdr terminal attach {terminal_id}$"], capture_output=True, text=True)
+    pids = [int(x) for x in r.stdout.split()]
+    for pid in pids:
+        try: os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+    end = time.time() + timeout
+    while time.time() < end and any(_pid_alive(p) for p in pids): time.sleep(0.05)
+    return pids
+
+def _pid_alive(pid):
+    try: os.kill(pid, 0); return True
+    except OSError: return False
+
+def detach(name):
+    """X in the manager: close the session's herd window, keep the session. False if no window."""
+    r = recorded(name)
+    if not r: return False
+    _, p = find(name)
+    detach_client(p["terminal_id"])   # wrapper exits cleanly -> no 'terminate processes?' prompt
+    time.sleep(0.5)
+    if _win_alive(r["wid"]): close_window(r["wid"])
+    _locked(lambda d: d.pop(name, None))
+    tile(quiet=True)
+    return True
+
+def attached_names():
+    """Sessions with a live recorded herd window (manager excluded)."""
+    recs = {n: r for n, r in _locked(lambda d: dict(d)).items() if n != MGR}
+    if not recs: return []
+    q = json.loads(_jxa(JXA_QUERY, [r["wid"] for r in recs.values()]))
+    live = {w["label"] for w in workspaces()}
+    return [n for n in sorted(recs, key=lambda n: recs[n]["created"]) if str(recs[n]["wid"]) in q["windows"] and n in live]
+
+def broadcast(text, names=None):
+    """Run `text` (+Enter) in every attached session. Returns the names it was sent to."""
+    if not text.strip(): return []
+    names = attached_names() if names is None else names
+    for n in names:
+        h("pane", "run", find(n)[1]["pane_id"], text)
+    return names
+
+def send_keys_all(key, names=None):
+    """Send one key (herdr send-keys name, e.g. 'enter', 'ctrl+c') to every attached session."""
+    names = attached_names() if names is None else names
+    for n in names:
+        h("pane", "send-keys", find(n)[1]["pane_id"], key)
+    return names
+
+def send_raw_all(data, names=None):
+    """Live broadcast: forward exact terminal bytes (as text) to every attached session."""
+    names = attached_names() if names is None else names
+    for n in names:
+        h("pane", "send-text", find(n)[1]["pane_id"], data)
+    return names
+
+KEYNAMES = {"\x1b[A": "<Up>", "\x1bOA": "<Up>", "\x1b[B": "<Down>", "\x1bOB": "<Down>",
+            "\x1b[C": "<Right>", "\x1bOC": "<Right>", "\x1b[D": "<Left>", "\x1bOD": "<Left>",
+            "\x1b[H": "<Home>", "\x1bOH": "<Home>", "\x1b[F": "<End>", "\x1bOF": "<End>",
+            "\x1b[3~": "<Del>", "\x1b[5~": "<PgUp>", "\x1b[6~": "<PgDn>", "\x1bOP": "<F1>",
+            "\x1bOQ": "<F2>", "\x1bOR": "<F3>", "\x1bOS": "<F4>"}
+
+def split_keys(data):
+    """Split raw input into tokens: escape sequences, single chars. Returns list of str."""
+    out, i = [], 0
+    while i < len(data):
+        c = data[i]
+        if c == "\x1b" and i + 1 < len(data) and data[i + 1] in "[O":
+            j = i + 2
+            if data[i + 1] == "[" and j < len(data) and data[j] == "M":   # X10 mouse: ESC [ M b x y
+                out.append(data[i:j + 4]); i = j + 4; continue
+            while j < len(data) and not ("\x40" <= data[j] <= "\x7e"): j += 1
+            out.append(data[i:j + 1]); i = j + 1
+        else: out.append(c); i += 1
+    return out
+
+def key_label(t):
+    if t in KEYNAMES: return KEYNAMES[t]
+    if t == "\x1b": return "<Esc>"
+    if t in ("\r", "\n"): return "<Enter>"
+    if t == "\t": return "<Tab>"
+    if t == "\x7f": return "<BS>"
+    if len(t) == 1 and ord(t) < 32: return "^" + chr(ord(t) + 64)
+    if t.startswith("\x1b"): return "<" + t[1:].replace("\x1b", "") + ">"
+    return t
+
+def clean_clip():
+    """Strip the trailing padding spaces herdr's attach renderer writes on every row
+    (Terminal.app copies them, so lines come out full-width)."""
+    t = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+    c = "\n".join(l.rstrip(" \t") for l in t.replace("\r\n", "\n").split("\n")).rstrip("\n")
+    if t.endswith("\n"): c += "\n"
+    subprocess.run(["pbcopy"], input=c, text=True, check=True)
+    return len(t) - len(c)
+
+def copy_session(name):
+    """Copy the session's full retained output (herdr scrollback) to the macOS clipboard."""
+    _, p = find(name)
+    r = subprocess.run(["herdr", "pane", "read", p["pane_id"], "--source", "recent-unwrapped", "--lines", "1000000"],
+                       capture_output=True, text=True)
+    if r.returncode: raise RuntimeError(r.stderr.strip())
+    try: text = json.loads(r.stdout)["result"]["read"]["text"]
+    except Exception: text = r.stdout
+    text = text.rstrip("\n") + "\n"
+    subprocess.run(["pbcopy"], input=text, text=True, check=True)
+    return text.count("\n")
+
+def paste_session(name, text=None):
+    """Type the clipboard into the session WITHOUT pressing Enter.
+    Multi-line: at a shell prompt (bash/zsh/sh/fish) each newline is sent as Ctrl-V + newline
+    (readline/zle quoted-insert), so the lines stay in ONE pending command line; macOS bash 3.2
+    has no bracketed paste. For other foreground programs (agents, editors) the text is wrapped
+    in bracketed-paste markers (ESC[200~ ... ESC[201~)."""
+    _, p = find(name)
+    if text is None: text = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+    if not text: return 0
+    text = text.replace("\r\n", "\n").rstrip("\n") if "\n" in text else text
+    payload = text
+    if "\n" in text:
+        try:
+            fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
+            fg = (fp[0].get("name") or "").lstrip("-") if fp else ""
+        except SystemExit: fg = ""
+        payload = text.replace("\n", "\x16\n") if fg in ("bash", "zsh", "sh", "fish") else f"\x1b[200~{text}\x1b[201~"
+    h("pane", "send-text", p["pane_id"], payload)
+    return len(text)
+
+def rename(old, new_):
+    if not NAME_RE.match(new_): raise ValueError("bad name")
+    if new_ in {w["label"] for w in workspaces()}: raise ValueError("name exists")
+    w, _ = find(old)
+    h("workspace", "rename", w["workspace_id"], new_)
+    def mv(d):
+        if old in d: d[new_] = d.pop(old)
+        return d.get(new_)
+    r = _locked(mv)
+    if r: subprocess.run(["osascript", "-e", f'tell application "Terminal" to set custom title of selected tab of window id {int(r["wid"])} to {osa_str(new_)}'], capture_output=True)
+
+def app():
+    if not recorded(MGR): manager_window(tile_after=False)
+    r = subprocess.run([sys.argv[0], "new"], capture_output=True, text=True)
+    if r.returncode: sys.exit(r.stderr)
+    open_(r.stdout.split("\t")[0])
+
+def sessions():
+    """All herdr workspaces as rows for the manager."""
+    ws = workspaces(); ps = panes(); recs = _locked(lambda d: dict(d))
+    rows = []
+    for w in ws:
+        p = next((x for x in ps if x["workspace_id"] == w["workspace_id"]), {})
+        cmd = ""
+        if p:
+            try:
+                fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
+                cmd = " ".join(x.get("cmdline", x.get("name", "")) for x in fp)
+            except SystemExit: pass
+            if p.get("agent"): cmd = (cmd + f" [{p['agent']}:{p.get('agent_status','')}]").strip()
+        label = w["label"]
+        rows.append({"name": label, "herd": is_herd(label, recs),
+                     "window": label in recs, "cwd": (p.get("foreground_cwd") or p.get("cwd", "")).replace(os.path.expanduser("~"), "~", 1),
+                     "cmd": cmd, "agent": p.get("agent_status", "")})
+    return rows
+
+def manager():
+    import curses, signal
+    if os.environ.get("HERD_TEST_SANDBOX"):   # headless tests: fake rows, every mutation only logged
+        log = os.environ["HERD_TEST_SANDBOX"]
+        n = int(os.environ.get("HERD_TEST_ROWS", "6"))
+        g = globals(); sys.argv[0] = "/usr/bin/false"   # N's `herd new` subprocess can't run
+        g["sessions"] = lambda: [{"name": f"fake-{i}", "herd": True, "window": i % 2 == 0, "cwd": "~", "cmd": "-bash", "agent": ""} for i in range(n)]
+        g["attached_names"] = lambda: [f"fake-{i}" for i in range(n) if i % 2 == 0]
+        for fn in ("send_raw_all", "send_keys_all", "broadcast", "refocus_manager", "open_", "kill", "killall", "rename", "new", "copy_session", "paste_session", "detach"):
+            g[fn] = (lambda fn: lambda *a, **k: (open(log, "a").write(f"{fn} {a}\n"), a[1] if fn in ("broadcast", "send_keys_all", "send_raw_all") and len(a) > 1 else [])[1])(fn)
+    def cleanup(*_):
+        try: _locked(lambda d: d.pop(MGR, None))
+        except Exception: pass
+        subprocess.Popen(["nohup", os.path.abspath(sys.argv[0]), "tile"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    def on_sig(*_): cleanup(); os._exit(0)
+    # Only drop the record if this process is the recorded manager window (headless runs don't touch it).
+    in_window = os.environ.get("TERM_PROGRAM") == "Apple_Terminal"
+    if in_window:
+        for sg in (signal.SIGHUP, signal.SIGTERM): signal.signal(sg, on_sig)
+
+    def ui(scr):
+        curses.curs_set(0); scr.timeout(250); curses.use_default_colors(); curses.raw()
+        # Mouse: ncurses enables xterm mode 1000 (X10 encoding), which Terminal.app sends with
+        # TERM=xterm-256color. mouseinterval(0) = no click-resolution delay; double-click is
+        # detected here (same row twice within DBL s). Wheel up = BUTTON4_PRESSED; on this
+        # ncurses (6.0, ABI 5) wheel down arrives as REPORT_MOUSE_POSITION.
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION); curses.mouseinterval(0)
+        DBL = 0.4; lastclick = [0.0, -1]
+        stub_open = os.environ.get("HERD_TEST_STUB_OPEN"); state_file = os.environ.get("HERD_TEST_STATE")
+        try:
+            curses.init_pair(1, curses.COLOR_CYAN, -1); curses.init_pair(2, curses.COLOR_GREEN, -1)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1); curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(5, curses.COLOR_RED, -1); curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
+        except curses.error: pass
+        C = lambda i: curses.color_pair(i)
+        rows, sel, last, msg, top = [], 0, 0.0, "", 0
+        show_help = [os.environ.get("HERD_MGR_HELP", "1") != "0"]; msg_seen = ["", 0.0]
+        want_sel = [os.environ.get("HERD_MGR_SEL")]
+        me = os.path.realpath(os.path.abspath(sys.argv[0])); mt0 = [os.path.getmtime(me)] if os.path.exists(me) else [0]
+        def maybe_reload():
+            """Auto-reload: if the herd script changed and still compiles, re-exec in place."""
+            try: mt = os.path.getmtime(me)
+            except OSError: return
+            if mt == mt0[0]: return
+            mt0[0] = mt
+            if subprocess.run([sys.executable, "-m", "py_compile", me], capture_output=True).returncode: return
+            os.environ["HERD_MGR_SEL"] = rows[sel]["name"] if rows else ""
+            os.environ["HERD_MGR_HELP"] = "1" if show_help[0] else "0"
+            curses.endwin()
+            os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
+        k_last = [None]; esc_until = [0.0]
+        CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
+        CSI_MAP = {"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
+                   "H": curses.KEY_HOME, "F": curses.KEY_END, "1~": curses.KEY_HOME, "7~": curses.KEY_HOME,
+                   "4~": curses.KEY_END, "8~": curses.KEY_END, "3~": curses.KEY_DC}
+        def read_key():
+            """getch + manual escape parsing. Returns a key code, 27 for a bare Esc, or None for
+            any other escape sequence / Esc+char (ignored, never a command). Handles CSI (ESC [ ..)
+            and SS3 (ESC O ..) arrows even when curses keypad doesn't decode them."""
+            k = scr.getch()
+            if k != 27: return k
+            seq = []; scr.timeout(30)
+            try:
+                c = scr.getch()
+                if c == -1: return 27                                   # bare Esc
+                if c not in (ord("["), ord("O")):
+                    return None                                          # Esc+char (Alt-x): ignore
+                seq = [c]
+                while len(seq) < 24:
+                    c = scr.getch()
+                    if c == -1: return None                              # truncated sequence: ignore
+                    seq.append(c)
+                    if seq[0] == ord("[") and len(seq) == 2 and c == ord("M"):
+                        for _ in range(3): scr.getch()                   # raw X10 mouse: swallow
+                        return None
+                    if 0x40 <= c <= 0x7e: break                          # final byte
+            finally: scr.timeout(250)
+            body = "".join(chr(c) for c in seq[1:] if 0 <= c < 256)
+            if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
+            return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
+        bc = {"focus": False, "echo": "", "n": 0}
+        HELP = ["click > for live broadcast", "click list to exit", "\u23ce open", "N new", "X detach", "K kill", "A kill all",
+                "H hide help", "Q quit", "click select", "dbl-click open"]
+        def wrap_items(items, width):
+            """Greedy pack items (2-space separated) into lines <= width; never truncates."""
+            lines, cur_ = [], ""
+            for it in items:
+                while len(it) > width:            # item wider than the window: hard-wrap it
+                    if cur_: lines.append(cur_); cur_ = ""
+                    lines.append(it[:width]); it = it[width:]
+                cand = f"{cur_}  {it}" if cur_ else it
+                if len(cand) <= width: cur_ = cand
+                else: lines.append(cur_); cur_ = it
+            if cur_: lines.append(cur_)
+            return lines
+        def put(y, x, t, a=0):
+            H, W = scr.getmaxyx()
+            if 0 <= y < H and x < W:
+                try: scr.addnstr(y, x, t, max(0, W - x - 1), a)
+                except curses.error: pass
+        def prompt(q):
+            H, W = scr.getmaxyx(); curses.echo(); curses.curs_set(1); scr.timeout(-1)
+            put(H - 1, 0, " " * (W - 1)); put(H - 1, 0, q, C(3) | curses.A_BOLD)
+            try: v = scr.getstr(H - 1, min(len(q), W - 2), 40).decode().strip()
+            except Exception: v = ""
+            curses.noecho(); curses.curs_set(0); scr.timeout(250); return v
+        while True:
+            if time.time() - last > 2:
+                maybe_reload()
+                try:
+                    rows = sessions()
+                    if want_sel[0]:
+                        sel = next((i for i, r in enumerate(rows) if r["name"] == want_sel[0]), sel); want_sel[0] = None
+                except SystemExit as e: msg = f"! {e}"
+                except Exception as e: msg = f"! {e}"
+                last = time.time()
+            sel = max(0, min(sel, len(rows) - 1))
+            scr.erase(); H, W = scr.getmaxyx()
+            put(0, 1, "herd", C(1) | curses.A_BOLD); put(0, 6, f"{len(rows)} sessions  {time.strftime('%H:%M:%S')}", curses.A_DIM)
+            help_lines = wrap_items(HELP, max(1, W - 2)) if show_help[0] else []
+            foot_h = 1 + len(help_lines) + 3   # status + hints + divider + 2-line broadcast prompt
+            list_h = max(1, (H - 2 - foot_h) // 2)
+            if sel < top: top = sel
+            if sel >= top + list_h: top = sel - list_h + 1
+            for i, r in enumerate(rows[top:top + list_h]):
+                y = 2 + i * 2; idx = top + i
+                mark = "\u25cf" if r["window"] else "\u25cb"
+                attr = C(4) | curses.A_BOLD if idx == sel else (C(2) if r["window"] else (curses.A_NORMAL if r["herd"] else curses.A_DIM))
+                tag = "" if r["herd"] else "  ext"
+                line = f" {mark} {r['name']}{tag}"
+                put(y, 0, line.ljust(W - 1) if idx == sel else line, attr)
+                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}", curses.A_DIM)
+            y0 = H - 1 - len(help_lines)            # first hint row
+            py = y0 - 2                              # broadcast area: rows py, py+1
+            pfx = " > "; room = max(1, W - len(pfx) - 2)
+            if bc["focus"]:
+                put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
+                put(py, 0, pfx, curses.A_BOLD)
+            else:
+                put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
+                put(py, 0, pfx, curses.A_DIM)
+            for i, ln in enumerate(help_lines): put(y0 + i, 1, ln, C(1))
+            if msg != msg_seen[0]: msg_seen[:] = [msg, time.time()]
+            if msg and time.time() - msg_seen[1] > 8: msg = ""          # status lingers ~8s
+            if msg: put(H - 1, 1, msg, C(5) if msg.startswith("!") else C(3))
+            if bc["focus"]:
+                curses.curs_set(1)
+                try: scr.move(py, len(pfx))
+                except curses.error: pass
+            else: curses.curs_set(0)
+            scr.refresh()
+            if state_file: open(state_file, "w").write(f"{sel} focus={bc['focus']} help={show_help[0]}")
+            if os.environ.get("HERD_TEST_KEYLOG"): open(os.environ["HERD_TEST_KEYLOG"], "a").write(f"{k_last[0]}\n")
+            if os.environ.get("HERD_TEST_DUMP"):
+                dp = os.environ["HERD_TEST_DUMP"]
+                open(dp + ".tmp", "w").write("\n".join(scr.instr(y, 0, W).decode(errors="replace").rstrip() for y in range(H)))
+                os.replace(dp + ".tmp", dp)
+            if bc["focus"]:
+                # LIVE passthrough: read raw bytes from the tty (curses never sees them), keep mouse
+                # events local, forward everything else unchanged as one batch.
+                import select as _sel
+                r_, _, _ = _sel.select([0], [], [], 0.25)
+                if not r_: continue
+                data = os.read(0, 4096)
+                while _sel.select([0], [], [], 0.01)[0]:
+                    more = os.read(0, 4096)
+                    if not more: break
+                    data += more
+                fwd, exit_live = [], False
+                for t in split_keys(data.decode("utf-8", errors="surrogateescape")):
+                    if t.startswith("\x1b[M") and len(t) == 6:              # X10 mouse
+                        b_, mx_, my_ = ord(t[3]) - 32, ord(t[4]) - 33, ord(t[5]) - 33
+                        if b_ & 3 == 0 and not (b_ & 64) and my_ not in (py, py + 1): exit_live = True
+                        continue
+                    if t.startswith("\x1b[<") and t[-1:] in "Mm":            # SGR mouse
+                        try:
+                            b_, mx_, my_ = (int(v) for v in t[3:-1].split(";")); my_ -= 1
+                            if t[-1] == "M" and b_ & 3 == 0 and not (b_ & 64) and my_ not in (py, py + 1): exit_live = True
+                        except ValueError: pass
+                        continue
+                    fwd.append(t)
+                if fwd:
+                    payload = "".join(fwd)
+                    try:
+                        ns = send_raw_all(payload.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"), attached_names())
+                        bc["n"] = len(ns)
+                    except SystemExit as e: msg = f"! {e}"
+                    except Exception as e: msg = f"! {e}"
+                if exit_live:
+                    bc["focus"] = False; esc_until[0] = time.time() + 0.3; msg = "live broadcast off"
+                continue
+            k = read_key()
+            if k is None: continue
+            if k != -1: k_last[0] = k
+            if k == -1: continue
+            if k == curses.KEY_RESIZE: continue
+            do_open = False
+            if k == curses.KEY_MOUSE:
+                try: _, mx, my, _, bs = curses.getmouse()
+                except curses.error: continue
+                if bs & curses.BUTTON4_PRESSED: sel -= 1; continue
+                if bs & (curses.REPORT_MOUSE_POSITION | getattr(curses, "BUTTON5_PRESSED", 0)): sel += 1; continue
+                if bs & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED):
+                    if my in (py, py + 1):                             # click the > area: go LIVE
+                        try: bc["n"] = len(attached_names())
+                        except Exception: bc["n"] = 0
+                        bc["focus"] = True; bc["echo"] = ""; msg = ""; continue
+                    if my < 2 or (my - 2) // 2 >= list_h: continue
+                    idx = top + (my - 2) // 2
+                    if idx >= len(rows): continue
+                    now = time.time()
+                    dbl = bool(bs & curses.BUTTON1_DOUBLE_CLICKED) or (lastclick[1] == idx and now - lastclick[0] < DBL)
+                    sel = idx; lastclick[:] = [0.0 if dbl else now, idx]
+                    if not dbl: continue
+                    do_open = True
+                else: continue
+            ch = chr(k) if 0 <= k < 256 else ""
+            if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc
+            cur = rows[sel]["name"] if rows else None
+            try:
+                if ch == "Q": return
+                elif ch == "H": show_help[0] = not show_help[0]
+                elif k in (curses.KEY_DOWN,) or ch == "j": sel += 1
+                elif k in (curses.KEY_UP,) or ch == "k": sel -= 1
+                elif (do_open or k in (10, 13, curses.KEY_ENTER)) and rows:
+                    cur = rows[sel]["name"]
+                    if stub_open: open(stub_open, "a").write(cur + "\n")
+                    else: open_(cur, quiet=True)
+                    msg = f"opened {cur}"; last = 0
+                elif ch == "A":
+                    v = prompt(f"kill ALL {len(rows)} sessions? [y/N] ")
+                    if v.lower() == "y":
+                        ks = killall(None, quiet=True); refocus_manager(); msg = f"killed {len(ks)}: " + " ".join(ks); last = 0
+                    else: msg = "kill all cancelled"
+                elif ch == "K" and cur: kill(cur, quiet=True); refocus_manager(); msg = f"killed {cur}"; last = 0
+                elif ch == "N":
+                    r = subprocess.run([sys.argv[0], "new"], capture_output=True, text=True)
+                    if r.returncode: msg = "! " + r.stderr.strip()
+                    else: n = r.stdout.split("\t")[0]; open_(n, quiet=True, keep_manager_focus=True); msg = f"new {n}"; last = 0
+                elif ch == "X" and cur:
+                    msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
+            except SystemExit as e: msg = f"! {e}"
+            except Exception as e: msg = f"! {e}"
+    os.environ.setdefault("ESCDELAY", "25")   # Esc leaves the broadcast prompt without a 1s lag
+    try: curses.wrapper(ui)
+    finally:
+        if in_window: cleanup()
+
+def main(a):
+    if not a or a[0] in ("-h", "--help", "help"): print(__doc__); return
+    c, rest = a[0], a[1:]
+    if c == "new": new(rest[0] if rest else None)
+    elif c == "ls": ls()
+    elif c == "open" and rest: open_(rest[0])
+    elif c == "kill" and rest: kill(rest[0])
+    elif c == "killall": killall([x for x in rest if x != "--all"] or None)
+    elif c == "copy" and rest: print(f"copied {copy_session(rest[0])} lines")
+    elif c == "paste" and rest: print(f"pasted {paste_session(rest[0])} chars")
+    elif c == "detach" and rest: print("detached" if detach(rest[0]) else "not attached")
+    elif c == "cleanclip": print(f"cleanclip: removed {clean_clip()} padding chars")
+    elif c == "broadcast" and rest:
+        ns = broadcast(" ".join(rest)); print(f"sent to {len(ns)} sessions: " + ", ".join(ns))
+    elif c == "tile": tile()
+    elif c == "untile": print("untile: no-op placeholder")
+    elif c == "attach" and rest: attach(rest[0])
+    elif c == "_layout": [print(i, layout(*map(int, rest[:4]), i, manager=True)) for i in range(1, 7)] if "--manager" in rest else [print(i, grid(*map(int, rest[:4]), i)) for i in range(1, 10)]
+    elif c == "manager": manager_window() if "--window" in rest else manager()
+    elif c == "rename" and len(rest) == 2: rename(*rest)
+    elif c == "id" and rest: print(find(rest[0])[1]["pane_id"])
+    elif c == "app": app()  # used by Herd Terminal.app
+    else: print(__doc__); sys.exit(2)
+main(sys.argv[1:])
