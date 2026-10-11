@@ -1115,7 +1115,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.3.0")
+        _herd_log(f"manager start pid={os.getpid()} version=0.4.0")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hints", "(F) toggle focus"]]
