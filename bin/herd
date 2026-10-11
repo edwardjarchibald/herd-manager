@@ -27,9 +27,9 @@ Test hooks (environment variables, for headless testing of `herd manager`; unset
   HERD_TEST_KEYLOG=<file>   append the last key code after each frame
   HERD_TEST_STUB_OPEN=<f>   log Enter/double-click opens instead of opening windows
 """
-import json, os, re, subprocess, sys, time, fcntl
+import json, os, re, shlex, subprocess, sys, time, fcntl
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
+NAME_RE = re.compile(r"^[^\x00-\x1f\x7f\"'`$\\]{1,120}$")   # labels may contain / ~ spaces ( )
 
 _server_checked = []
 
@@ -67,39 +67,134 @@ def workspaces(): return h("workspace", "list")["workspaces"]
 def panes(): return h("pane", "list")["panes"]
 
 def find(name):
-    for w in workspaces():
-        if w["label"] == name:
-            ps = [p for p in panes() if p["workspace_id"] == w["workspace_id"]]
-            if not ps: sys.exit(f"{name}: workspace has no panes")
-            return w, ps[0]
-    sys.exit(f"no herd session named {name!r} (see `herd ls`)")
+    """Exact session name, else a unique prefix of one."""
+    ws = workspaces()
+    hit = [w for w in ws if w["label"] == name] or [w for w in ws if w["label"].startswith(name)]
+    if len(hit) > 1: sys.exit(f"{name!r} is ambiguous: " + ", ".join(w["label"] for w in hit))
+    if not hit: sys.exit(f"no herd session named {name!r} (see `herd ls`)")
+    w = hit[0]
+    ps = [p for p in panes() if p["workspace_id"] == w["workspace_id"]]
+    if not ps: sys.exit(f"{w['label']}: workspace has no panes")
+    return w, ps[0]
+
+# ---- program label (never argv: command lines can contain secrets) ----
+def prog_label(p, fp=None):
+    if p.get("agent"): return p["agent"]
+    if fp is None:
+        try: fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
+        except SystemExit: fp = []
+    if not fp: return ""
+    nm = fp[0].get("name") or ""
+    return os.path.basename(nm).lstrip("-")
+
+# ---- automatic session names: <repo>/<branch> in git, else the cwd with ~ ----
+NAMES_META = os.path.expanduser("~/.config/herd/names.json")
+_git_cache = {}
+
+def git_name(cwd):
+    """'<main repo folder>/<branch>' (short hash if detached) or None if cwd isn't in a git repo."""
+    hit = _git_cache.get(cwd)
+    if hit and time.time() - hit[0] < 3: return hit[1]
+    res = None
+    try:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                            "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            common, branch = (r.stdout.split("\n") + ["", ""])[:2]
+            common = common.rstrip("/")
+            repo = os.path.basename(os.path.dirname(common)) if os.path.basename(common) == ".git" \
+                else os.path.basename(common).removesuffix(".git")
+            if branch in ("HEAD", ""):
+                b = subprocess.run(["git", "-C", cwd, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=3)
+                branch = b.stdout.strip() or "HEAD"
+            res = f"{repo}/{branch}"
+    except (OSError, subprocess.SubprocessError): pass
+    _git_cache[cwd] = (time.time(), res)
+    return res
+
+def tilde(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+def desired_name(cwd):
+    return git_name(cwd) or tilde(cwd) if cwd else "~"
+
+def uniquify(base, taken):
+    if base not in taken: return base
+    n = 2
+    while f"{base} ({n})" in taken: n += 1
+    return f"{base} ({n})"
+
+def _meta(fn=None):
+    os.makedirs(os.path.dirname(NAMES_META), exist_ok=True)
+    with open(NAMES_META + ".lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try: d = json.load(open(NAMES_META))
+        except Exception: d = {}
+        r = fn(d) if fn else None
+        if fn:
+            tmp = NAMES_META + ".tmp"; json.dump(d, open(tmp, "w"), indent=1); os.replace(tmp, NAMES_META)
+        return d if fn is None else r
+
+def is_manual(meta, w):
+    m = meta.get(w["workspace_id"])
+    return bool(m and m.get("manual") and m.get("label") == w["label"])
+
+def _relabel(w, new_):
+    """Rename a herdr workspace and carry its herd window record/title along."""
+    old = w["label"]
+    h("workspace", "rename", w["workspace_id"], new_)
+    def mv(d):
+        if old in d and new_ not in d: d[new_] = d.pop(old)
+        return d.get(new_)
+    r = _locked(mv)
+    if r: subprocess.run(["osascript", "-e", f'tell application "Terminal" to set custom title of selected tab of window id {int(r["wid"])} to {osa_str(new_)}'], capture_output=True)
+
+def auto_names(apply=True, ws=None, ps=None):
+    """Recompute automatic names for every session (manual ones keep theirs). Returns [(old, new)]."""
+    ws = workspaces() if ws is None else ws
+    ps = panes() if ps is None else ps
+    meta = _meta()
+    cwd_of = {p["workspace_id"]: (p.get("foreground_cwd") or p.get("cwd") or "") for p in ps}
+    ws = sorted(ws, key=lambda w: w.get("number", 0))
+    taken = {w["label"] for w in ws if is_manual(meta, w)}
+    changes = []
+    for w in ws:
+        if is_manual(meta, w): continue
+        base = desired_name(cwd_of.get(w["workspace_id"], ""))
+        want = base if w["label"] == base and base not in taken else None
+        if want is None:
+            m = re.fullmatch(re.escape(base) + r" \((\d+)\)", w["label"])
+            want = w["label"] if m and w["label"] not in taken else uniquify(base, taken)
+        taken.add(want)
+        if want != w["label"]: changes.append((w, want))
+    if apply:
+        for w, new_ in changes: _relabel(w, new_)
+    return [(w["label"], n) for w, n in changes]
 
 def new(name=None):
     labels = {w["label"] for w in workspaces()}
+    manual = name is not None
     if name is None:
-        n = 1
-        while f"dev-{n}" in labels: n += 1
-        name = f"dev-{n}"
-    elif not NAME_RE.match(name): sys.exit("name must be [A-Za-z0-9._-], max 41 chars")
+        name = uniquify(desired_name(os.path.expanduser("~")), labels)
+    elif not NAME_RE.match(name): sys.exit("name must not contain quotes, $, backslash or control characters")
     elif name in labels: sys.exit(f"{name!r} already exists")
-    r = h("workspace", "create", "--label", name, "--cwd", os.path.expanduser("~"),
-          "--env", f"HERD_SESSION={name}", "--no-focus")
+    r = h("workspace", "create", "--label", name, "--cwd", os.path.expanduser("~"), "--no-focus")
     p = r["root_pane"]
+    if manual:
+        wid_ = r["workspace"]["workspace_id"]
+        _meta(lambda d: d.__setitem__(wid_, {"manual": True, "label": name}))
     print(f"{name}\t{p['terminal_id']}\t{p['pane_id']}")
     return name
 
 def ls():
     ws = {w["workspace_id"]: w["label"] for w in workspaces()}
-    print(f"{'NAME':28} {'TERMINAL_ID':20} {'PANE':7} {'CWD':45} COMMAND")
+    print(f"{'NAME':44} {'TERMINAL_ID':20} {'PANE':7} {'CWD':45} COMMAND")
     for p in panes():
         if p["workspace_id"] not in ws: continue
-        cmd = p.get("agent") or ""
-        try:
-            fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
-            cmd = " ".join(x.get("cmdline", x.get("name", "")) for x in fp) + (f" [agent:{p['agent']}]" if p.get("agent") else "")
-        except SystemExit: pass
+        cmd = prog_label(p)
         cwd = (p.get("foreground_cwd") or p.get("cwd", "")).replace(os.path.expanduser("~"), "~", 1)
-        print(f"{ws[p['workspace_id']]:28} {p.get('terminal_id',''):20} {p['pane_id']:7} {cwd:45} {cmd}")
+        print(f"{ws[p['workspace_id']]:44} {p.get('terminal_id',''):20} {p['pane_id']:7} {cwd:45} {cmd}")
 
 def osa_str(s): return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -279,8 +374,9 @@ def open_(name, quiet=False, keep_manager_focus=False):
     find(name)
     r = recorded(name)
     if r: focus_window(r["wid"]); return
-    wid = _open_window(f"clear; exec {os.path.abspath(sys.argv[0])} attach {name}", name)
-    _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session"}))
+    w_, _ = find(name); name = w_["label"]
+    wid = _open_window(f"clear; exec {shlex.quote(os.path.abspath(sys.argv[0]))} attach {shlex.quote(w_['workspace_id'])}", name)
+    _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session", "ws": w_["workspace_id"]}))
     tile(quiet=quiet)
     if keep_manager_focus: refocus_manager()
 
@@ -288,13 +384,16 @@ def attach(name):
     """Runs inside the herd window. Not exec'd so cleanup runs on detach or on
     window close (SIGHUP/TERM), then retiles the remaining windows in the background."""
     import signal
-    _, p = find(name)
+    if re.fullmatch(r"w[0-9A-Za-z]+", name) and name in {w["workspace_id"] for w in workspaces()}:
+        ws_id = name; p = next(x for x in panes() if x["workspace_id"] == ws_id)   # attach by workspace id
+    else:
+        w_, p = find(name); ws_id = w_["workspace_id"]
     child = subprocess.Popen(["herdr", "terminal", "attach", p["terminal_id"]])
     done = []
     def cleanup(*_):
         if done: return
         done.append(1)
-        try: _locked(lambda d: d.pop(name, None))
+        try: _locked(lambda d: [d.pop(k) for k in [k for k, r in d.items() if r.get("ws") == ws_id or k == name]])
         except Exception: pass
         subprocess.Popen(["nohup", os.path.abspath(sys.argv[0]), "tile"], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -476,15 +575,18 @@ def paste_session(name, text=None):
     return len(text)
 
 def rename(old, new_):
+    """Manual rename: the name sticks (auto naming skips it) until `herd rename --auto <name>`."""
     if not NAME_RE.match(new_): raise ValueError("bad name")
     if new_ in {w["label"] for w in workspaces()}: raise ValueError("name exists")
     w, _ = find(old)
-    h("workspace", "rename", w["workspace_id"], new_)
-    def mv(d):
-        if old in d: d[new_] = d.pop(old)
-        return d.get(new_)
-    r = _locked(mv)
-    if r: subprocess.run(["osascript", "-e", f'tell application "Terminal" to set custom title of selected tab of window id {int(r["wid"])} to {osa_str(new_)}'], capture_output=True)
+    _relabel(w, new_)
+    _meta(lambda d: d.__setitem__(w["workspace_id"], {"manual": True, "label": new_}))
+
+def rename_auto(name):
+    w, _ = find(name)
+    _meta(lambda d: d.pop(w["workspace_id"], None))
+    ch = auto_names()
+    return dict(ch).get(w["label"], w["label"])
 
 def app():
     if not recorded(MGR): manager_window(tile_after=False)
@@ -494,19 +596,20 @@ def app():
 
 def sessions():
     """All herdr workspaces as rows for the manager."""
-    ws = workspaces(); ps = panes(); recs = _locked(lambda d: dict(d))
+    ws = workspaces(); ps = panes()
+    try:
+        if auto_names(ws=ws, ps=ps): ws = workspaces()      # names follow cwd/branch changes
+    except SystemExit: pass
+    recs = _locked(lambda d: dict(d))
     rows = []
     for w in ws:
         p = next((x for x in ps if x["workspace_id"] == w["workspace_id"]), {})
         cmd = ""
         if p:
-            try:
-                fp = h("pane", "process-info", "--pane", p["pane_id"])["process_info"]["foreground_processes"]
-                cmd = " ".join(x.get("cmdline", x.get("name", "")) for x in fp)
-            except SystemExit: pass
-            if p.get("agent"): cmd = (cmd + f" [{p['agent']}:{p.get('agent_status','')}]").strip()
+            cmd = prog_label(p)
+            if p.get("agent") and p.get("agent_status"): cmd += f" ({p['agent_status']})"
         label = w["label"]
-        rows.append({"name": label, "herd": is_herd(label, recs),
+        rows.append({"name": label, "herd": True,
                      "window": label in recs, "cwd": (p.get("foreground_cwd") or p.get("cwd", "")).replace(os.path.expanduser("~"), "~", 1),
                      "cmd": cmd, "agent": p.get("agent_status", "")})
     return rows
@@ -519,7 +622,7 @@ def manager():
         g = globals(); sys.argv[0] = "/usr/bin/false"   # N's `herd new` subprocess can't run
         g["sessions"] = lambda: [{"name": f"fake-{i}", "herd": True, "window": i % 2 == 0, "cwd": "~", "cmd": "-bash", "agent": ""} for i in range(n)]
         g["attached_names"] = lambda: [f"fake-{i}" for i in range(n) if i % 2 == 0]
-        for fn in ("send_raw_all", "send_keys_all", "broadcast", "refocus_manager", "open_", "kill", "killall", "rename", "new", "copy_session", "paste_session", "detach"):
+        for fn in ("auto_names", "send_raw_all", "send_keys_all", "broadcast", "refocus_manager", "open_", "kill", "killall", "rename", "new", "copy_session", "paste_session", "detach"):
             g[fn] = (lambda fn: lambda *a, **k: (open(log, "a").write(f"{fn} {a}\n"), a[1] if fn in ("broadcast", "send_keys_all", "send_raw_all") and len(a) > 1 else [])[1])(fn)
     def cleanup(*_):
         try: _locked(lambda d: d.pop(MGR, None))
@@ -564,7 +667,8 @@ def manager():
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
         CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
-        CSI_MAP = {"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
+        SHIFT_ENTER = 0x5E00   # private code for Shift-Enter
+        CSI_MAP = {"13;2u": SHIFT_ENTER, "27;2;13~": SHIFT_ENTER, "13;2~": SHIFT_ENTER, "2M": SHIFT_ENTER,"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
                    "H": curses.KEY_HOME, "F": curses.KEY_END, "1~": curses.KEY_HOME, "7~": curses.KEY_HOME,
                    "4~": curses.KEY_END, "8~": curses.KEY_END, "3~": curses.KEY_DC}
         def read_key():
@@ -577,6 +681,7 @@ def manager():
             try:
                 c = scr.getch()
                 if c == -1: return 27                                   # bare Esc
+                if c in (10, 13): return SHIFT_ENTER                      # ESC CR (Option/Shift-Enter mappings)
                 if c not in (ord("["), ord("O")):
                     return None                                          # Esc+char (Alt-x): ignore
                 seq = [c]
@@ -590,10 +695,11 @@ def manager():
                     if 0x40 <= c <= 0x7e: break                          # final byte
             finally: scr.timeout(250)
             body = "".join(chr(c) for c in seq[1:] if 0 <= c < 256)
+            if body in CSI_MAP: return CSI_MAP[body]                    # e.g. 13;2u, 27;2;13~ (Shift-Enter)
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        HELP = ["click > for live broadcast", "click list to exit", "\u23ce open", "N new", "X detach", "K kill", "A kill all",
+        HELP = ["\u21e7\u23ce/N new", "click > for live broadcast", "click list to exit", "\u23ce open", "X detach", "K kill", "A kill all",
                 "H hide help", "Q quit", "click select", "dbl-click open"]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
@@ -633,17 +739,22 @@ def manager():
             put(0, 1, "herd", C(1) | curses.A_BOLD); put(0, 6, f"{len(rows)} sessions  {time.strftime('%H:%M:%S')}", curses.A_DIM)
             help_lines = wrap_items(HELP, max(1, W - 2)) if show_help[0] else []
             foot_h = 1 + len(help_lines) + 3   # status + hints + divider + 2-line broadcast prompt
-            list_h = max(1, (H - 2 - foot_h) // 2)
+            LB = 1                                   # list base row (row 0 = header)
+            list_h = max(1, (H - LB - 1 - foot_h) // 3)  # 3 rows per entry + 1 closing border row
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
+            inner = max(4, W - 5)                    # text width inside the outline
             for i, r in enumerate(rows[top:top + list_h]):
-                y = 2 + i * 2; idx = top + i
+                y = LB + i * 3 + 1; idx = top + i       # name row; detail row y+1; borders y-1 and y+2
                 mark = "\u25cf" if r["window"] else "\u25cb"
-                attr = C(4) | curses.A_BOLD if idx == sel else (C(2) if r["window"] else (curses.A_NORMAL if r["herd"] else curses.A_DIM))
-                tag = "" if r["herd"] else "  ext"
-                line = f" {mark} {r['name']}{tag}"
-                put(y, 0, line.ljust(W - 1) if idx == sel else line, attr)
-                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}", curses.A_DIM)
+                attr = curses.A_BOLD | (C(2) if r["window"] else 0) if idx == sel else (C(2) if r["window"] else curses.A_NORMAL)
+                put(y, 2, f"{mark} {r['name']}"[:inner], attr)
+                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}"[:inner - 2], curses.A_DIM)
+                if idx == sel and W >= 8:
+                    g = C(2) | curses.A_BOLD; bw = W - 2
+                    put(y - 1, 0, "\u256d" + "\u2500" * (bw - 2) + "\u256e", g)
+                    put(y + 2, 0, "\u2570" + "\u2500" * (bw - 2) + "\u256f", g)
+                    for yy in (y, y + 1): put(yy, 0, "\u2502", g); put(yy, bw - 1, "\u2502", g)
             y0 = H - 1 - len(help_lines)            # first hint row
             py = y0 - 2                              # broadcast area: rows py, py+1
             pfx = " > "; room = max(1, W - len(pfx) - 2)
@@ -719,8 +830,8 @@ def manager():
                         try: bc["n"] = len(attached_names())
                         except Exception: bc["n"] = 0
                         bc["focus"] = True; bc["echo"] = ""; msg = ""; continue
-                    if my < 2 or (my - 2) // 2 >= list_h: continue
-                    idx = top + (my - 2) // 2
+                    if my <= LB or (my - LB - 1) % 3 == 2 or (my - LB - 1) // 3 >= list_h: continue
+                    idx = top + (my - LB - 1) // 3
                     if idx >= len(rows): continue
                     now = time.time()
                     dbl = bool(bs & curses.BUTTON1_DOUBLE_CLICKED) or (lastclick[1] == idx and now - lastclick[0] < DBL)
@@ -747,10 +858,10 @@ def manager():
                         ks = killall(None, quiet=True); refocus_manager(); msg = f"killed {len(ks)}: " + " ".join(ks); last = 0
                     else: msg = "kill all cancelled"
                 elif ch == "K" and cur: kill(cur, quiet=True); refocus_manager(); msg = f"killed {cur}"; last = 0
-                elif ch == "N":
-                    r = subprocess.run([sys.argv[0], "new"], capture_output=True, text=True)
-                    if r.returncode: msg = "! " + r.stderr.strip()
-                    else: n = r.stdout.split("\t")[0]; open_(n, quiet=True, keep_manager_focus=True); msg = f"new {n}"; last = 0
+                elif ch == "N" or k == SHIFT_ENTER:
+                    import contextlib, io
+                    with contextlib.redirect_stdout(io.StringIO()): n = new()
+                    if n: open_(n, quiet=True, keep_manager_focus=True); msg = f"new {n}"; last = 0
                 elif ch == "X" and cur:
                     msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"
@@ -779,7 +890,10 @@ def main(a):
     elif c == "attach" and rest: attach(rest[0])
     elif c == "_layout": [print(i, layout(*map(int, rest[:4]), i, manager=True)) for i in range(1, 7)] if "--manager" in rest else [print(i, grid(*map(int, rest[:4]), i)) for i in range(1, 10)]
     elif c == "manager": manager_window() if "--window" in rest else manager()
+    elif c == "rename" and len(rest) == 2 and rest[0] == "--auto": print(rename_auto(rest[1]))
     elif c == "rename" and len(rest) == 2: rename(*rest)
+    elif c == "names":   # one auto-naming pass (--dry-run to preview)
+        for o, n in auto_names(apply="--dry-run" not in rest): print(f"{o}  ->  {n}")
     elif c == "id" and rest: print(find(rest[0])[1]["pane_id"])
     elif c == "app": app()  # used by Herd Terminal.app
     else: print(__doc__); sys.exit(2)

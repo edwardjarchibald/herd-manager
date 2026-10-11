@@ -2,7 +2,7 @@
 
 **Named [herdr](https://herdr.dev)-backed Terminal.app sessions with auto-tiling, a session manager and csshx-style live broadcast, for macOS.**
 
-Each session is a persistent herdr terminal with a readable name (`dev-1`, `api`, …) shown in its own
+Each session is a persistent herdr terminal with a readable name (`myrepo/main`, `myrepo/issue/42-fix`, `~/Downloads`) shown in its own
 plain Terminal.app window. Windows tile into an even grid; a narrow manager column lists every session.
 Because sessions live in the background herdr server, you (or a script or AI agent) can read and type
 into any session by name, and closing a window never kills the session.
@@ -35,15 +35,15 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 
 ### Dock apps
 
-- **Herd Terminal**: opens the manager if it isn't open, then a new `dev-N` session window, and retiles.
+- **Herd Terminal**: opens the manager if it isn't open, then a new session window, and retiles.
 - **Herd Manager**: opens the manager window, or brings it to the front.
 
 ### Commands
 
 | Command | What it does |
 |---|---|
-| `herd new [name]` | Create a session (default: next free `dev-N`); prints name, terminal id, pane id |
-| `herd ls` | List sessions: name, terminal id, pane id, cwd, running command |
+| `herd new [name]` | Create a session (default: automatic name, see below); prints name, terminal id, pane id |
+| `herd ls` | List sessions: name, terminal id, pane id, cwd, program (agent name or program basename; never the full command line) |
 | `herd open <name>` | Open (or focus) a tiled Terminal window attached to the session |
 | `herd attach <name>` | What each window runs: attach, then clean up and retile on exit |
 | `herd detach <name>` | Close the session's window but keep the session running |
@@ -55,7 +55,9 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 | `herd cleanclip` | Strip trailing padding spaces from the clipboard |
 | `herd copy <name>` / `herd paste <name>` | Copy a session's whole output to the clipboard / paste the clipboard into it (no Enter) |
 | `herd id <name>` | Print the herdr pane id |
-| `herd rename <old> <new>` | Rename a session |
+| `herd rename <old> <new>` | Rename a session manually (the name sticks) |
+| `herd rename --auto <name>` | Return a session to automatic naming |
+| `herd names [--dry-run]` | Run one automatic-naming pass now |
 | `herd app` | What Herd Terminal runs: manager (if needed) + new session |
 
 ### Manager keys
@@ -67,7 +69,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | `↑`/`↓`, `j`/`k`, wheel | Move the selection |
 | click | Select a session |
 | `Enter` / double-click | Open the session, or bring its window to the front |
-| `N` | New session and window |
+| `N` / `Shift-Enter` | New session and window (Shift-Enter needs a Terminal key mapping, see below) |
 | `X` | Detach: close the window, keep the session |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
@@ -77,6 +79,25 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | click the list | Leave live broadcast |
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
+
+## Session names
+
+Names follow each session's working directory automatically (the manager rechecks every 2 s):
+
+- In a git repo or worktree: `<repo>/<branch>`, where `<repo>` is the main repository's folder name
+  (also for worktrees) and `<branch>` the current branch (short commit hash when detached).
+- Elsewhere: the directory with `~` for home, e.g. `~/Downloads`.
+- Duplicates get ` (2)`, ` (3)`, …
+- Manual names (`herd new <name>`, `herd rename`) stick until `herd rename --auto <name>`.
+
+Commands that take a name also accept a unique prefix (`herd open myrepo/iss`); quote names with spaces.
+
+## Shift-Enter
+
+Terminal.app sends a plain Return for Shift-Return by default, so herd can't tell it apart from Enter.
+To use Shift-Enter for "new session", add a key mapping in *Terminal → Settings → Profiles → (your
+profile) → Keyboard → +*: Key **Return**, Modifier **Shift**, Action **Send Text**, text `\033[13;2u`.
+herd also understands `ESC [27;2;13~` and `ESC CR`. `N` always works.
 
 ## Tiling
 

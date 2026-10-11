@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 (2026-10-11)
+
+- Security: `herd ls` and the manager no longer show full command lines (they can contain
+  secrets passed as arguments). Only the agent name or the program's basename is shown.
+- Automatic session names: `<repo>/<branch>` inside git repos/worktrees (main repo folder name;
+  short hash when detached), otherwise the cwd with `~`. Names follow cwd/branch changes, duplicates
+  get ` (2)`, manual names stick (`herd rename --auto` to undo). New `herd names [--dry-run]`.
+- Names may contain `/`, `~`, spaces and parentheses; commands accept unique name prefixes; window
+  commands are shell-quoted and windows attach by workspace id.
+- Manager: Shift-Enter (CSI 13;2u, CSI 27;2;13~, ESC CR) creates a session like `N`; the selected
+  session is drawn with a green rounded outline instead of a highlight bar.
+
 ## 0.1.1 (2026-10-11)
 
 - Fix: Herd Terminal failed right after login when Terminal.app wasn't running
