@@ -2,7 +2,7 @@
 
 **Named [herdr](https://herdr.dev)-backed Terminal.app sessions with auto-tiling, a session manager and csshx-style live broadcast, for macOS.**
 
-Each session is a persistent herdr terminal with a readable name (`myrepo`, `mr-42` for an issue worktree, `Downloads`) shown in its own
+Each session is a persistent herdr terminal with a readable name (`dev-1`, `dev-2`, or `mr-42` for an issue worktree) shown in its own
 plain Terminal.app window. Windows tile into an even grid; a narrow manager column lists every session.
 Because sessions live in the background herdr server, you (or a script or AI agent) can read and type
 into any session by name, and closing a window never kills the session.
@@ -70,7 +70,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | `↑`/`↓`, `j`/`k`, wheel | Move the selection |
 | click | Select a session |
 | `Enter` / double-click | Open the session, or bring its window to the front |
-| `N` / `Shift-Enter` | New session and window (Shift-Enter needs a Terminal key mapping, see below) |
+| `N` | New session and window |
 | `X` | Detach: close the window, keep the session |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
@@ -81,7 +81,9 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 
-The selected session's own Terminal window gets a green outline, drawn by a tiny helper
+The selected session's own Terminal window gets a 9px outline in the highlight bar's cyan (Terminal's
+ANSI cyan, 51/187/200), hugging the window's rounded corners (16pt on macOS 26, 10pt before;
+override with `HERD_OUTLINE_PX`, `HERD_OUTLINE_RADIUS`, `HERD_OUTLINE_RGB`), drawn by a tiny helper
 (`helper/herd-outline.swift`, compiled with `swiftc` into `~/.cache/herd` on first use; skipped if
 swiftc isn't available). It's a borderless, click-through, non-activating overlay that never takes
 focus and needs no Accessibility permission. It follows the window's bounds about once a second, hides
@@ -96,19 +98,12 @@ Names follow each session's working directory automatically (the manager recheck
   e.g. `bh-6` for BlackHole issue 6. The prefix is a 2-4 letter abbreviation of the repo name
   (origin remote name, else the main worktree folder); override it in `~/.config/herd/prefixes.json`
   (`{"MyRepo": "mr"}`).
-- Otherwise: the cwd folder name (`~` for home). Duplicates get `-2`, `-3`, …
+- Everything else: `dev-<N>` (lowest free number). A dev-N name stays stable; it isn't renumbered.
 - Manual names (`herd new <name>`, `herd rename`) stick until `herd rename --auto <name>`.
 
 The detail line in the manager (and the CWD column of `herd ls`) shows `<repo>/<branch>` inside git
 (main repo folder name, also for worktrees; short hash when detached), else the cwd with `~`.
 Commands that take a name also accept a unique prefix; quote names with spaces.
-
-## Shift-Enter
-
-Terminal.app sends a plain Return for Shift-Return by default, so herd can't tell it apart from Enter.
-To use Shift-Enter for "new session", add a key mapping in *Terminal → Settings → Profiles → (your
-profile) → Keyboard → +*: Key **Return**, Modifier **Shift**, Action **Send Text**, text `\033[13;2u`.
-herd also understands `ESC [27;2;13~` and `ESC CR`. `N` always works.
 
 ## Tiling
 

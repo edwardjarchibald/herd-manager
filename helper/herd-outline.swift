@@ -7,13 +7,25 @@
 // covered by fullscreen), checked via CGWindowList bounds (no window titles/screen content).
 import AppKit
 
-let border: CGFloat = 3
+// Usage: herd-outline [border_px] [window_corner_radius] [r g b (0-255)]
+let args = CommandLine.arguments.dropFirst().compactMap { Double($0) }
+let border = CGFloat(args.count > 0 ? args[0] : 9)
+let radius: CGFloat = {   // macOS window corner radius: ~16pt on macOS 26, ~10pt before
+    if args.count > 1 { return CGFloat(args[1]) }
+    return ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ? 16 : 10
+}()
+let color = args.count > 4 ? NSColor(srgbRed: args[2] / 255, green: args[3] / 255, blue: args[4] / 255, alpha: 1)
+                           : NSColor(srgbRed: 51 / 255, green: 187 / 255, blue: 200 / 255, alpha: 1)
+
 final class BorderView: NSView {
+    // A filled ring that hugs the window: inner edge = the window's rounded rect (radius R),
+    // outer edge = R + border, so the corners stay concentric.
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.systemGreen.setStroke()
-        let p = NSBezierPath(roundedRect: bounds.insetBy(dx: border / 2, dy: border / 2), xRadius: 8, yRadius: 8)
-        p.lineWidth = border
-        p.stroke()
+        color.setFill()
+        let ring = NSBezierPath(roundedRect: bounds, xRadius: radius + border, yRadius: radius + border)
+        ring.append(NSBezierPath(roundedRect: bounds.insetBy(dx: border, dy: border), xRadius: radius, yRadius: radius))
+        ring.windingRule = .evenOdd
+        ring.fill()
     }
 }
 

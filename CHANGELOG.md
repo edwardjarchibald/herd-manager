@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-10-11)
+
+- Default session name is now a stable `dev-<N>` (lowest free number, never renumbered); only
+  issue worktrees get `<prefix>-<issue>`. The detail line still shows `<repo>/<branch>` or the cwd.
+- Removed Shift-Enter handling.
+- Window outline: 9px ring in the highlight bar's cyan (Terminal ANSI cyan 51/187/200) with corners
+  concentric to the window's (16pt radius on macOS 26, 10pt before); configurable via env vars.
+
 ## 0.2.0 (2026-10-11)
 
 - Security: `herd ls` and the manager no longer show full command lines (they can contain
