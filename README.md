@@ -99,7 +99,7 @@ turns the dock off: the manager gets its full column height and tiling works as 
 
 ### Manager keys
 
-Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
+Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the hints. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window uses font size 13 so 10 sessions fit without scrolling.
 
 | Key | Action |
 |---|---|
@@ -111,11 +111,11 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
-| `H` | Toggle the key hints |
+| `?` / `H` | Toggle the hints overlay (Esc also closes it) |
 | `F` | Focus toggle for the whole herd group (manager + every herd-tracked Terminal window, never other Terminal windows). First press: raises them all above other apps, manager frontmost with keyboard focus. Second press: re-activates every app that was in front of the group, in their original order, so the original top app is on top again and their windows cover the group (log: `~/.cache/herd/focus.log`). Nothing is minimized or hidden; click the manager to get it back. The outline hides while the group is behind |
 | `Q` | Quit the manager (sessions keep running) |
-| click `> click for broadcast` | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once) |
-| click the list | End live broadcast (shown in yellow while live) |
+| click `> click for broadcast` (bottom line) | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once); the line echoes what you type |
+| click the list | End live broadcast (`(click list to end)` in yellow at the right of the bottom line) |
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 

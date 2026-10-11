@@ -357,6 +357,7 @@ def _jxa(src, arg):
 
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
 MGR_W = 520
+MGR_FONT = 13   # manager font size in dock mode (Monaco 13: 23 rows x ~60 cols in a 502x442 cell)
 
 def layout(x, y, w, h, n, manager=False, gap=GAP):
     """Manager column (fixed MGR_W, full height, top-left) + even grid in the rest."""
@@ -430,6 +431,10 @@ def tile(quiet=False):
         zw, zh = round(w * 0.8), round(h * 0.8)
         l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
         moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
+    if has_mgr and dock_rect:   # manager cell is small: font that fits 10 sessions (22 rows) + margin
+        fs = int(os.environ.get("HERD_MGR_FONT", MGR_FONT))
+        subprocess.run(["osascript", "-e", f'tell application "Terminal" to if (font size of selected tab of window id {int(alive[MGR]["wid"])}) is not {fs} then set font size of selected tab of window id {int(alive[MGR]["wid"])} to {fs}'],
+                       capture_output=True)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
     _jxa(JXA_SET, moves)
     if zoomed: raise_behind_manager(alive[zoomed]["wid"])      # zoomed stays on top of Terminal's stack
@@ -1070,7 +1075,7 @@ def manager():
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
         rows, sel, last, msg, top = [], 0, 0.0, "", 0
-        show_help = [os.environ.get("HERD_MGR_HELP", "1") != "0"]; msg_seen = ["", 0.0]
+        show_help = [os.environ.get("HERD_MGR_HELP", "0") == "1"]; msg_seen = ["", 0.0]
         want_sel = [os.environ.get("HERD_MGR_SEL")]
         me = os.path.realpath(os.path.abspath(sys.argv[0])); mt0 = [os.path.getmtime(me)] if os.path.exists(me) else [0]
         def maybe_reload():
@@ -1118,10 +1123,10 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.4.2")
+        _herd_log(f"manager start pid={os.getpid()} version=0.4.3")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
-                ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hints", "(F) toggle focus"]]
+                ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
             lines, cur_ = [], ""
@@ -1169,36 +1174,40 @@ def manager():
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
             scr.erase(); H, W = scr.getmaxyx()
-            put(0, 1, "herd", C(1) | curses.A_BOLD); put(0, 6, f"{len(rows)} sessions  {time.strftime('%H:%M:%S')}", curses.A_DIM)
-            help_lines = [l for items in HELP for l in wrap_items(items, max(1, W - 1))] if show_help[0] else []
-            foot_h = 1 + len(help_lines) + 3   # status + hints + divider + 2-line broadcast prompt
-            list_h = max(1, (H - 2 - foot_h) // 2)
+            list_h = max(1, (H - 2) // 2)             # 2 rows per session; divider + broadcast line at the bottom
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
             for i, r in enumerate(rows[top:top + list_h]):
-                y = 2 + i * 2; idx = top + i
+                y = i * 2; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
                 attr = C(4) | curses.A_BOLD if idx == sel else (C(2) if r["window"] else curses.A_NORMAL)
                 line = f" {mark} {r['name']}"
                 put(y, 0, line.ljust(W - 1) if idx == sel else line, attr)
                 put(y + 1, 4, f"{r['cwd']}  {r['cmd']}", curses.A_DIM)
-            y0 = H - 1 - len(help_lines)            # first hint row
-            py = y0 - 2                              # broadcast area: rows py, py+1
-            pfx = " > "; room = max(1, W - len(pfx) - 2)
-            if bc["focus"]:
-                put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
-                put(py, 0, pfx, curses.A_BOLD)
-                put(py + 1, 1, "click list to end broadcast", C(3))
-            else:
-                put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
-                put(py, 0, pfx + "click for broadcast", curses.A_DIM)
-            for i, ln in enumerate(help_lines): put(y0 + i, 0, ln, C(1))
+            py = H - 1                                   # the one bottom line
+            pfx = " > "
+            put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
             if msg != msg_seen[0]: msg_seen[:] = [msg, time.time()]
-            if msg and time.time() - msg_seen[1] > 8: msg = ""          # status lingers ~8s
-            if msg: put(H - 1, 1, msg, C(5) if msg.startswith("!") else C(3))
+            if msg and time.time() - msg_seen[1] > 4: msg = ""          # transient status ~4s
+            if bc["focus"]:
+                cue = "(click list to end)"
+                room = W - 1 - len(pfx) - (len(cue) + 1 if W - 1 - len(pfx) > len(cue) + 8 else 0)
+                put(py, 0, pfx, curses.A_BOLD)
+                put(py, len(pfx), bc["echo"][-max(0, room):] if room > 0 else "", curses.A_BOLD)
+                if room < W - 1 - len(pfx): put(py, W - 1 - len(cue), cue, C(3))
+            elif msg: put(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
+            else: put(py, 0, pfx + "click for broadcast", curses.A_DIM)
+            if show_help[0]:                             # hints overlay: centered box over the list
+                hl = [l for items in HELP for l in wrap_items(items, max(1, W - 5))] + ["", "? / H / Esc: close"]
+                bw = min(W - 1, max(len(l) for l in hl) + 4); bh = len(hl) + 2
+                bx = max(0, (W - 1 - bw) // 2); by = max(0, (H - 2 - bh) // 2)
+                put(by, bx, "\u250c" + "\u2500" * (bw - 2) + "\u2510", C(1))
+                for i, l in enumerate(hl):
+                    put(by + 1 + i, bx, "\u2502 " + l.ljust(bw - 4) + " \u2502", C(1) if l and not l.startswith("?") else curses.A_DIM)
+                put(by + bh - 1, bx, "\u2514" + "\u2500" * (bw - 2) + "\u2518", C(1))
             if bc["focus"]:
                 curses.curs_set(1)
-                try: scr.move(py, len(pfx))
+                try: scr.move(py, min(W - 2, len(pfx) + len(bc["echo"])))
                 except curses.error: pass
             else: curses.curs_set(0)
             scr.refresh()
@@ -1223,17 +1232,21 @@ def manager():
                 for t in split_keys(data.decode("utf-8", errors="surrogateescape")):
                     if t.startswith("\x1b[M") and len(t) == 6:              # X10 mouse
                         b_, mx_, my_ = ord(t[3]) - 32, ord(t[4]) - 33, ord(t[5]) - 33
-                        if b_ & 3 == 0 and not (b_ & 64) and my_ not in (py, py + 1): exit_live = True
+                        if b_ & 3 == 0 and not (b_ & 64) and my_ != py: exit_live = True
                         continue
                     if t.startswith("\x1b[<") and t[-1:] in "Mm":            # SGR mouse
                         try:
                             b_, mx_, my_ = (int(v) for v in t[3:-1].split(";")); my_ -= 1
-                            if t[-1] == "M" and b_ & 3 == 0 and not (b_ & 64) and my_ not in (py, py + 1): exit_live = True
+                            if t[-1] == "M" and b_ & 3 == 0 and not (b_ & 64) and my_ != py: exit_live = True
                         except ValueError: pass
                         continue
                     fwd.append(t)
                 if fwd:
                     payload = "".join(fwd)
+                    for t in fwd:
+                        if t in ("\r", "\n"): bc["echo"] = ""
+                        elif t in ("\x7f", "\b"): bc["echo"] = bc["echo"][:-1]
+                        elif t.isprintable(): bc["echo"] = (bc["echo"] + t)[-200:]
                     try:
                         ns = send_raw_all(payload.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"), attached_names())
                         bc["n"] = len(ns)
@@ -1254,12 +1267,12 @@ def manager():
                 if bs & curses.BUTTON4_PRESSED: sel -= 1; continue
                 if bs & (curses.REPORT_MOUSE_POSITION | getattr(curses, "BUTTON5_PRESSED", 0)): sel += 1; continue
                 if bs & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED):
-                    if my in (py, py + 1):                             # click the > area: go LIVE
+                    if my == py:                             # click the > area: go LIVE
                         try: bc["n"] = len(attached_names())
                         except Exception: bc["n"] = 0
                         bc["focus"] = True; bc["echo"] = ""; msg = ""; continue
-                    if my < 2 or (my - 2) // 2 >= list_h: continue
-                    idx = top + (my - 2) // 2
+                    if my >= list_h * 2: continue
+                    idx = top + my // 2
                     if idx >= len(rows): continue
                     sel = idx; continue                                # single click selects
                 else: continue
@@ -1268,7 +1281,8 @@ def manager():
             cur = rows[sel]["name"] if rows else None
             try:
                 if ch == "Q": return
-                elif ch == "H": show_help[0] = not show_help[0]
+                elif ch in ("H", "?"): show_help[0] = not show_help[0]
+                elif k == 27 and show_help[0]: show_help[0] = False
                 elif k in (curses.KEY_DOWN,) or ch == "j": sel += 1
                 elif k in (curses.KEY_UP,) or ch == "k": sel -= 1
                 elif ch == "O" and rows:                                   # Enter does nothing in list mode

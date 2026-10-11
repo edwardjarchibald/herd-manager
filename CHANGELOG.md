@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 - 2026-10-11
+
+### Changed
+- Manager UI:
+  - No header line and no permanent hints area.
+  - The hints are a centered overlay box over the list, toggled with `?` or `H`; Esc also closes it. `?` is the one non-uppercase command key. The overlay starts hidden.
+  - At the bottom: a divider, then a single line. That line is the dim `> click for broadcast` when off. When live it shows a bright `> ` plus the typed echo and a yellow `(click list to end)` at the right end. Transient status messages (F, O, K, ...) show in that line for about 4 s.
+- In dock mode the tiler sets the manager window's own font size to 13 (`MGR_FONT`, overridable with `HERD_MGR_FONT`). In its 502x442 cell that gives 23 rows x 60 cols, so all 10 sessions (20 rows) plus the divider and broadcast line fit without scrolling. Other Terminal windows and the profile are untouched.
+
 ## 0.4.2 - 2026-10-11
 
 ### Changed
