@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-10-11
+
+### Changed
+- New dock-on layout, replacing the 5x3 grid:
+  - The left panel is 30% of the tiled width. The manager sits on top at exactly one row of a 3-row grid, so its bottom lines up with terminal row 1. The dock is the rest of the panel below it.
+  - Terminals tile adaptively in the area to the right: 1 = full; 2 = 2 columns; 3 = 3 full-height columns; 4 = 2x2; 5-6 = 3x2; 7-9 = 3x3; more than 9 = 4 columns x ceil(n/4) rows.
+  - In partial grids the last columns get one cell fewer and those cells span the column height: with 5 the last column is full height, with 7 the last two columns are halves, with 8 the last column is halves.
+- Z zooms to 80% of the terminal area, centered.
+- The manager shows one line per session: the full name, then the dim folder/repo subtitle, truncated.
+- The forced font 13 is gone. On retile, the manager window gets the largest Monaco size up to 16 that fits every session plus the divider and broadcast line (manager window only).
+
 ## 0.4.3 - 2026-10-11
 
 ### Changed

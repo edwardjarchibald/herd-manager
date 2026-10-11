@@ -64,21 +64,21 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 
 ### Dock area
 
-With the dock on (the default), the tiled area is a fixed **5x3 grid** of equal cells:
+With the dock on (the default), the left panel is 30% of the tiled width: the manager on top (exactly one
+row of a 3-row grid) and the dock below it. Terminals tile adaptively in the area to the right:
 
 ```
-+-------+-------+-------+-------+-------+
-|  mgr  |  t1   |  t2   |  t3   |  t4   |
-+-------+-------+-------+-------+-------+
-|               |  t5   |  t6   |  t7   |
-|     dock      +-------+-------+-------+
-|               |  t8   |  t9   |  t10  |
-+---------------+-------+-------+-------+
++---------+------+------+------+      terminals:  1 full   2 = 2 cols   3 = 3 cols
+| manager |  t1  |  t4  |  t7  |                  4 = 2x2  5-6 = 3x2    7-9 = 3x3
++---------+------+------+------+                  >9 = 4 cols x ceil(n/4) rows
+|         |  t2  |  t5  |  t8  |      partial grids: the last column(s) get one cell
+|  dock   +------+------+------+      fewer, spanning the height (5: last column full
+|         |  t3  |  t6  |  t9  |      height; 7: last two columns in halves; 8: last
++---------+------+------+------+      column in halves)
 ```
 
-Up to 10 terminals fill t1..t10 in order. Unused cells stay empty (the grid doesn't stretch). With more
-than 10, the terminals share an even grid over the right three columns. Z zooms to 80% of the right three
-columns, centered.
+Z zooms to 80% of the terminal area, centered. The manager lists one line per session and picks the
+largest font (Monaco, up to 16) that fits all of them plus the divider and broadcast line.
 
 - The empty dock shows a faint dashed outline while Terminal is active.
 - Drag any app window (e.g. Grok Bot) so its center is over the dock. The outline turns bright with
@@ -99,7 +99,7 @@ turns the dock off: the manager gets its full column height and tiling works as 
 
 ### Manager keys
 
-Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the hints. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window uses font size 13 so 10 sessions fit without scrolling.
+Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the hints. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window gets the largest font up to 16 that fits every session on one line.
 
 | Key | Action |
 |---|---|

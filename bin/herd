@@ -357,7 +357,6 @@ def _jxa(src, arg):
 
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
 MGR_W = 520
-MGR_FONT = 13   # manager font size in dock mode (Monaco 13: 23 rows x ~60 cols in a 502x442 cell)
 
 def layout(x, y, w, h, n, manager=False, gap=GAP):
     """Manager column (fixed MGR_W, full height, top-left) + even grid in the rest."""
@@ -381,19 +380,56 @@ def docked():
     except Exception: return None
     return d if d.get("pid") else None
 
+def span_grid(x, y, w, h, n, gap=GAP):
+    """Adaptive terminal grid: 1 full; 2 = 2 cols; 3 = 3 full-height cols; 4 = 2x2; 5-6 = 3x2; 7-9 = 3x3;
+    >9 = 4 cols x ceil(n/4) rows. Partial grids: the LAST columns get one cell fewer and those cells
+    span the column height (5 -> last column full height; 7 -> last two columns 2 cells; 8 -> last column 2).
+    Column-major order. Cells only shrink as terminals are added."""
+    import math
+    if n <= 0: return []
+    cols, rows = {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (2, 2), 5: (3, 2), 6: (3, 2)}.get(n, (3, 3) if n <= 9 else (4, math.ceil(n / 4)))
+    short = cols * rows - n                      # columns (from the right) with rows-1 cells
+    x, y, w, h = x + gap, y + gap, w - 2 * gap, h - 2 * gap
+    cw = (w - gap * (cols - 1)) / cols
+    out = []
+    for c in range(cols):
+        k = rows - 1 if c >= cols - short else rows
+        rh = (h - gap * (k - 1)) / k
+        l = x + c * (cw + gap)
+        for r in range(k):
+            t = y + r * (rh + gap)
+            out.append((round(l), round(t), round(l + cw), round(t + rh)))
+    return out
+
 def dock_layout(x, y, w, h, n, gap=GAP):
-    """Dock on: fixed 5x3 grid of equal cells over the whole tiled area.
-    (r1,c1) manager; dock = 2x2 block c1-c2 x r2-r3; terminals fill r1 c2-c5, then c3-c5 x r2-r3
-    (10 cells). Fewer terminals leave cells empty (grid stays fixed). More than 10: even grid over the
-    right three columns (c3-c5, full height). Returns (manager, terminal rects, dock, terminal area)."""
-    cw = (w - 6 * gap) / 5; ch = (h - 4 * gap) / 3
-    L = lambda c: x + gap + c * (cw + gap); T = lambda r: y + gap + r * (ch + gap)
-    cell = lambda r, c, rs=1, cs=1: (round(L(c)), round(T(r)), round(L(c + cs - 1) + cw), round(T(r + rs - 1) + ch))
-    m = cell(0, 0); d = cell(1, 0, 2, 2)
-    slots = [cell(0, c) for c in range(1, 5)] + [cell(r, c) for r in (1, 2) for c in range(2, 5)]
-    area = (round(L(2)) - gap, y, round(L(4) + cw) + gap - (round(L(2)) - gap), h)   # c3-c5, full height
-    rects = slots[:n] if n <= 10 else grid(*area, n, gap)
-    return m, rects, d, area
+    """Dock on: left panel = 30% of the tiled width. Manager on top, exactly one row of a 3-row grid
+    (so its bottom lines up with terminal row 1 at 7-9 terminals); dock = rest of the panel below.
+    Terminals: span_grid() in the area to the right. Returns (manager, terminal rects, dock, terminal area)."""
+    lw = round(w * 0.3)
+    rh = (h - 4 * gap) / 3
+    m = (x + gap, y + gap, x + gap + lw, round(y + gap + rh))
+    d = (x + gap, round(y + 2 * gap + rh), x + gap + lw, y + h - gap)
+    area = (x + gap + lw, y, w - gap - lw, h)
+    return m, span_grid(*area, n, gap), d, area
+
+def fit_manager_font(wid, maxfs=16, minfs=9):
+    """Largest Monaco size <= maxfs at which the manager shows every session on one line plus the
+    divider and broadcast line (n + 2 rows). Only the manager window's own tab is changed."""
+    try: need = max(1, len(workspaces())) + 2
+    except SystemExit: return
+    wid = int(wid)
+    def get(): 
+        r = subprocess.run(["osascript", "-e", f'tell application "Terminal" to get {{font size, number of rows}} of selected tab of window id {wid}'],
+                           capture_output=True, text=True).stdout.replace(" ", "").split(",")
+        return (int(float(r[0])), int(r[1])) if len(r) == 2 else (0, 0)
+    b = subprocess.run(["osascript", "-e", f'tell application "Terminal" to get bounds of window id {wid}'], capture_output=True, text=True).stdout.strip()
+    fs, rows = get()
+    if not fs: return
+    for size in range(maxfs, minfs - 1, -1):
+        if size != fs:
+            subprocess.run(["osascript", "-e", f'tell application "Terminal"\n set font size of selected tab of window id {wid} to {size}\n set bounds of window id {wid} to {{{b}}}\nend tell'], capture_output=True)
+            fs, rows = get()
+        if rows >= need: break
 
 def tile(quiet=False):
     recs = _locked(lambda d: dict(d))
@@ -431,12 +467,9 @@ def tile(quiet=False):
         zw, zh = round(w * 0.8), round(h * 0.8)
         l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
         moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
-    if has_mgr and dock_rect:   # manager cell is small: font that fits 10 sessions (22 rows) + margin
-        fs = int(os.environ.get("HERD_MGR_FONT", MGR_FONT))
-        subprocess.run(["osascript", "-e", f'tell application "Terminal" to if (font size of selected tab of window id {int(alive[MGR]["wid"])}) is not {fs} then set font size of selected tab of window id {int(alive[MGR]["wid"])} to {fs}'],
-                       capture_output=True)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
     _jxa(JXA_SET, moves)
+    if has_mgr and dock_rect: fit_manager_font(alive[MGR]["wid"])
     if zoomed: raise_behind_manager(alive[zoomed]["wid"])      # zoomed stays on top of Terminal's stack
     if dock_rect: dock_raise()
     if not quiet:
@@ -1123,7 +1156,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.4.3")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.0")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
@@ -1174,16 +1207,18 @@ def manager():
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
             scr.erase(); H, W = scr.getmaxyx()
-            list_h = max(1, (H - 2) // 2)             # 2 rows per session; divider + broadcast line at the bottom
+            list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
             for i, r in enumerate(rows[top:top + list_h]):
-                y = i * 2; idx = top + i
+                y = i; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
                 attr = C(4) | curses.A_BOLD if idx == sel else (C(2) if r["window"] else curses.A_NORMAL)
                 line = f" {mark} {r['name']}"
-                put(y, 0, line.ljust(W - 1) if idx == sel else line, attr)
-                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}", curses.A_DIM)
+                sub = f"  {r['cwd']}"
+                sub = sub[:max(0, W - 1 - len(line))]
+                if idx == sel: put(y, 0, (line + sub).ljust(W - 1), attr)
+                else: put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
             py = H - 1                                   # the one bottom line
             pfx = " > "
             put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
@@ -1271,8 +1306,8 @@ def manager():
                         try: bc["n"] = len(attached_names())
                         except Exception: bc["n"] = 0
                         bc["focus"] = True; bc["echo"] = ""; msg = ""; continue
-                    if my >= list_h * 2: continue
-                    idx = top + my // 2
+                    if my >= list_h: continue
+                    idx = top + my
                     if idx >= len(rows): continue
                     sel = idx; continue                                # single click selects
                 else: continue
