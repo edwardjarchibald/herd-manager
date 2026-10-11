@@ -459,10 +459,25 @@ def focus_window(wid):
   activate
 end tell'''], capture_output=True)
 
+import contextlib
+@contextlib.contextmanager
+def keep_front():
+    """Safety net: whatever runs inside must not change the frontmost app. If it did, hand the
+    front back to the app that was frontmost before (NSRunningApplication; no Accessibility)."""
+    before = frontmost_pid()
+    try: yield
+    finally:
+        if before and frontmost_pid() != before:
+            subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT, before], capture_output=True)
+
 def refocus_manager():
-    """Make the recorded manager window frontmost/key again (only that window)."""
+    """Put the manager window back on top of Terminal's own stack WITHOUT activating Terminal.
+    (It used to call focus_window = `activate`, which pulled Terminal over the frontmost app.)"""
     r = _locked(lambda d: d.get(MGR))
-    if r: focus_window(r["wid"])
+    if not r: return
+    with keep_front():
+        subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then set index of window id {int(r["wid"])} to 1'],
+                       capture_output=True)
 
 def close_window(wid):
     subprocess.run(["osascript", "-e", f'tell application "Terminal" to close window id {int(wid)} saving no'], capture_output=True)
@@ -822,6 +837,14 @@ def zoom(name):
     _locked(f); tile(quiet=True)
     return "off" if was else "on"
 
+def mgr_zoom(cur, outline=None):
+    """Manager Z key handler. Never changes the frontmost app."""
+    with keep_front():
+        z = zoom(cur)
+        refocus_manager()
+        if outline and z: outline.follow(cur, force=True)
+    return f"{cur}: not attached" if z is None else f"zoom {z}: {cur}"
+
 def raise_behind_manager(wid):
     """Bring a herd window to the top of Terminal's own window stack while the manager stays the
     front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
@@ -829,8 +852,9 @@ def raise_behind_manager(wid):
     m = _locked(lambda d: d.get(MGR))
     lines = [f"  set index of window id {int(wid)} to 1"]
     if m: lines.append(f"  set index of window id {int(m['wid'])} to 1")
-    subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
-                   capture_output=True)
+    with keep_front():
+        subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
+                       capture_output=True)
 
 def manager():
     import curses, signal
@@ -1073,9 +1097,7 @@ def manager():
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
                 elif ch == "Z" and cur:
-                    z = zoom(cur); msg = f"{cur}: not attached" if z is None else f"zoom {z}: {cur}"
-                    refocus_manager(); last = 0
-                    if outline: outline.follow(cur, force=True)
+                    msg = mgr_zoom(cur, outline); last = 0
                 elif ch == "X" and cur:
                     msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"

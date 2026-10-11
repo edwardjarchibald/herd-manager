@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6 - 2026-10-11
+
+### Fixed
+- Manager keys Z, K, X, A and N pulled Terminal in front of the frontmost app. `refocus_manager()` called `focus_window()`, which runs `activate`. It now only re-orders the manager to the top of Terminal's own windows, never activates Terminal, and is wrapped in a `keep_front()` safety net that hands the front back to the previous app if it changed. The same net wraps the non-activating raise used by selection and Enter. The Z handler moved into `mgr_zoom()`.
+
 ## 0.2.5 - 2026-10-11
 
 ### Added
