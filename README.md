@@ -77,6 +77,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
 | `H` | Toggle the key hints |
+| `F` | Focus toggle for the whole herd group (manager + every herd-tracked Terminal window, never other Terminal windows). First press: raises them all above other apps, manager frontmost with keyboard focus. Second press: hands focus back to the app that was frontmost before (or the frontmost non-Terminal app), so its windows cover the group. Nothing is minimized or hidden; click the manager to get it back. The outline hides while the group is behind |
 | `Q` | Quit the manager (sessions keep running) |
 | click `> click for broadcast` | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once) |
 | click the list | End live broadcast (shown in yellow while live) |

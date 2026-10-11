@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.8 - 2026-10-11
+
+### Added
+- Manager key `F` (toggle focus) for the whole herd group: the manager plus every herd-tracked Terminal window in windows.json. Other Terminal windows are never touched. On: it remembers the frontmost app, raises each herd window (the zoomed one above the tiles), and activates Terminal with the manager frontmost so it keeps keyboard focus. Behind: it re-activates the remembered app with all its windows (or, if none is known, the frontmost non-Terminal app), so whatever sits under the group shows on top. Nothing is minimized or hidden. The outline hides while the group is behind and comes back once Terminal is frontmost again.
+
+### Changed
+- Bottom hint line is now `(K) kill  (A) killall  (Q) quit  (H) toggle hints  (F) toggle focus`.
+
 ## 0.2.7 - 2026-10-11
 
 ### Changed

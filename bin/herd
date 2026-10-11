@@ -856,6 +856,52 @@ def raise_behind_manager(wid):
         subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
                        capture_output=True)
 
+JXA_FRONT_NONTERM = """ObjC.import('AppKit'); var r = '';
+var ws = $.NSWorkspace.sharedWorkspace.runningApplications, me = $.NSRunningApplication.currentApplication;
+var wins = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo(1|16, 0)) || [];
+for (var i = 0; i < wins.length && !r; i++) { var w = wins[i];
+  if (w.kCGWindowLayer !== 0) continue;
+  var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(w.kCGWindowOwnerPID);
+  if (a.isNil() || a.activationPolicy !== 0) continue;
+  if (ObjC.unwrap(a.bundleIdentifier) === 'com.apple.Terminal') continue;
+  r = String(w.kCGWindowOwnerPID); }
+r"""
+JXA_REFRONT_ALL = """ObjC.import('AppKit');
+function run(argv){ var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(argv[0]));
+  if (a.isNil()) return 'gone'; a.activateWithOptions($.NSApplicationActivateAllWindows | $.NSApplicationActivateIgnoringOtherApps); return 'ok'; }"""
+
+def _terminal_pid():
+    r = subprocess.run(["pgrep", "-x", "Terminal"], capture_output=True, text=True)
+    return r.stdout.split()[0] if r.stdout.split() else ""
+
+def group_focus(state):
+    """Manager F key. state = {"on": bool, "prev": pid}. Toggles the herd group (manager + every
+    herd-tracked Terminal window from windows.json) between ON TOP of other apps and BEHIND them.
+    Only herd-tracked windows are touched; nothing is minimized or hidden."""
+    recs = _locked(lambda d: dict(d))
+    mgr = recs.get(MGR)
+    wids = [int(r["wid"]) for k, r in recs.items() if k != MGR and r.get("wid")]
+    if not state.get("on"):
+        front = frontmost_pid()
+        if front and front != _terminal_pid(): state["prev"] = front
+        # zoomed window last among sessions so it stays above the tiles, manager last of all
+        wids.sort(key=lambda w: any(r.get("zoom") and int(r.get("wid", 0)) == w for r in recs.values()))
+        lines = [f"    try\n      set index of window id {w} to 1\n    end try" for w in wids]
+        if mgr: lines.append(f"    try\n      set index of window id {int(mgr['wid'])} to 1\n    end try")
+        lines.append("    activate")
+        subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
+                       capture_output=True)
+        state["on"] = True
+        return f"group on top ({len(wids)} windows + manager)"
+    pid = state.get("prev") or ""
+    if pid and subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT_ALL, pid], capture_output=True, text=True).stdout.strip() != "ok":
+        pid = ""
+    if not pid:
+        pid = subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_FRONT_NONTERM], capture_output=True, text=True).stdout.strip()
+        if pid: subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT_ALL, pid], capture_output=True)
+    state["on"] = False; state["prev"] = ""
+    return "group sent behind" if pid else "! no other app to hand focus to"
+
 def manager():
     import curses, signal
     if os.environ.get("HERD_TEST_SANDBOX"):   # headless tests: fake rows, every mutation only logged
@@ -939,8 +985,9 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
+        gf = {"on": False, "prev": "", "behind": False, "t": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
-                ["(Q) quit", "(K) kill", "(A) killall", "(H) toggle hints"]]
+                ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hints", "(F) toggle focus"]]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
             lines, cur_ = [], ""
@@ -975,7 +1022,11 @@ def manager():
                 except Exception as e: msg = f"! {e}"
                 last = time.time()
             sel = max(0, min(sel, len(rows) - 1))
-            if outline:
+            if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
+                gf["t"] = time.time()
+                if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
+            if outline and gf["behind"]: outline._send("hide")
+            elif outline:
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
             scr.erase(); H, W = scr.getmaxyx()
@@ -1097,6 +1148,10 @@ def manager():
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
+                elif ch == "F":
+                    msg = group_focus(gf)
+                    gf["behind"] = not gf["on"]; gf["t"] = time.time()
+                    sel_seen[0] = None                                 # outline re-follows (or hides while behind)
                 elif ch == "Z" and cur:
                     msg = mgr_zoom(cur, outline); last = 0
                 elif ch == "X" and cur:
