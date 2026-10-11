@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 - 2026-10-11
+
+### Changed
+- F now restores the whole stack of apps that were in front of the group, not just one. While another app is in front, the manager keeps a snapshot of every regular app above Terminal, in front-to-back order (`lsappinfo visibleProcessList`, with accessory/background apps dropped). On "behind" they are re-activated bottom-most first and the original top app last, and the top app is checked to be frontmost (with a retry via `open -b`).
+- Focus events (manager start, on, behind, result) are always logged to `~/.cache/herd/focus.log`, rotated at 200 KB.
+
+### Fixed
+- 0.2.9 kept only one "previous app" pid, sampled once a second. Any regular app that was briefly frontmost (e.g. Wispr Flow while dictating) could replace the app you were really using. The fallback also had no ordering beyond the first match.
+
 ## 0.2.9 - 2026-10-11
 
 ### Fixed

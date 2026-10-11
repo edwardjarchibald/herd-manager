@@ -856,30 +856,49 @@ def raise_behind_manager(wid):
         subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
                        capture_output=True)
 
-def front_nonterm_pid():
-    """Frontmost non-Terminal app pid from LaunchServices' front-to-back app order (lsappinfo)."""
-    term = _terminal_pid()
-    out = subprocess.run(["lsappinfo", "visibleProcessList"], capture_output=True, text=True).stdout
-    for asn in re.findall(r'(ASN:0x[0-9a-f]+-0x[0-9a-f]+)', out):
-        m = re.search(r'"pid"=(\d+)', subprocess.run(["lsappinfo", "info", "-only", "pid", asn], capture_output=True, text=True).stdout)
-        if m and m.group(1) != term: return m.group(1)
-    return ""
+JXA_APPS = """ObjC.import('AppKit'); JSON.stringify(ObjC.unwrap($.NSWorkspace.sharedWorkspace.runningApplications).map(function(a){
+  return [ObjC.unwrap(a.localizedName) || '', a.processIdentifier, Number(a.activationPolicy), ObjC.unwrap(a.bundleIdentifier) || '']; }))"""
 
-def _activate_pid(pid):
+def apps_above_terminal():
+    """Regular apps whose windows are in front of Terminal, front-to-back, as [(pid, bundle id)].
+    Order from `lsappinfo visibleProcessList`; accessory/background apps (e.g. Wispr Flow) dropped."""
+    out = subprocess.run(["lsappinfo", "visibleProcessList"], capture_output=True, text=True).stdout
+    names = re.findall(r'ASN:0x[0-9a-f]+-0x[0-9a-f]+-"([^"]*)"', out)
+    try: apps = json.loads(subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_APPS], capture_output=True, text=True).stdout or "[]")
+    except ValueError: return []
+    by_name = {}
+    for n, pid, pol, bid in apps: by_name.setdefault(n.replace(" ", "_"), (str(pid), pol, bid))
+    res = []
+    for n in names:
+        pid, pol, bid = by_name.get(n, ("", -1, ""))
+        if bid == "com.apple.Terminal": break
+        if pid and int(pol) == 0: res.append((pid, bid))
+    return res
+
+def front_nonterm_pid():
+    s = apps_above_terminal()
+    return s[0][0] if s else ""
+
+def _activate_pid(pid, bid=""):
     """Activate app `pid` with all its windows; verify it became frontmost, else retry via `open -b`."""
     subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT_ALL, pid], capture_output=True, text=True)
     for _ in range(10):
         if frontmost_pid() == pid: return True
         time.sleep(0.05)
-    m = re.search(r'"CFBundleIdentifier"="([^"]+)"', subprocess.run(["lsappinfo", "info", "-only", "bundleid", pid], capture_output=True, text=True).stdout)
-    if m: subprocess.run(["open", "-b", m.group(1)], capture_output=True)
+    if not bid:
+        m = re.search(r'"CFBundleIdentifier"="([^"]+)"', subprocess.run(["lsappinfo", "info", "-only", "bundleid", pid], capture_output=True, text=True).stdout)
+        bid = m.group(1) if m else ""
+    if bid: subprocess.run(["open", "-b", bid], capture_output=True)
     for _ in range(10):
         if frontmost_pid() == pid: return True
         time.sleep(0.05)
     return False
 
 def _herd_log(line):
-    if os.environ.get("HERD_DEBUG"):
+    lp = os.path.expanduser("~/.cache/herd/focus.log")
+    os.makedirs(os.path.dirname(lp), exist_ok=True)
+    if os.path.exists(lp) and os.path.getsize(lp) > 200_000: os.replace(lp, lp + ".1")
+    if True:
         with open(os.path.expanduser("~/.cache/herd/focus.log"), "a") as f: f.write(time.strftime("%H:%M:%S ") + line + "\n")
 
 JXA_REFRONT_ALL = """ObjC.import('AppKit');
@@ -891,17 +910,19 @@ def _terminal_pid():
     return r.stdout.split()[0] if r.stdout.split() else ""
 
 def group_focus(state):
-    """Manager F key. state = {"on": bool, "prev": pid}. Toggles the herd group (manager + every
-    herd-tracked Terminal window from windows.json) between ON TOP of other apps and BEHIND them.
-    Only herd-tracked windows are touched; nothing is minimized or hidden."""
+    """Manager F key. state = {"on": bool, "stack": [(pid, bundle)]} where stack (front-to-back) is
+    kept fresh by the manager loop while a non-Terminal app is in front. Toggles the herd group
+    (manager + every herd-tracked Terminal window from windows.json) between ON TOP of other apps and
+    BEHIND them. Only herd-tracked windows are touched; nothing is minimized or hidden."""
     recs = _locked(lambda d: dict(d))
     mgr = recs.get(MGR)
     wids = [int(r["wid"]) for k, r in recs.items() if k != MGR and r.get("wid")]
     if not state.get("on"):
         front = frontmost_pid()
-        if front and front != _terminal_pid(): state["prev"] = front
-        _herd_log(f"on: front={front!r} prev={state.get('prev')!r}")
-        # zoomed window last among sessions so it stays above the tiles, manager last of all
+        if front and front != _terminal_pid():
+            st = apps_above_terminal()
+            if st: state["stack"] = st
+        _herd_log(f"on: front={front!r} stack={state.get('stack')!r}")
         wids.sort(key=lambda w: any(r.get("zoom") and int(r.get("wid", 0)) == w for r in recs.values()))
         lines = [f"    try\n      set index of window id {w} to 1\n    end try" for w in wids]
         if mgr: lines.append(f"    try\n      set index of window id {int(mgr['wid'])} to 1\n    end try")
@@ -910,13 +931,31 @@ def group_focus(state):
                        capture_output=True)
         state["on"] = True
         return f"group on top ({len(wids)} windows + manager)"
-    pid = state.get("prev") or ""
-    alive = pid and subprocess.run(["kill", "-0", pid], capture_output=True).returncode == 0
-    if not alive: pid = front_nonterm_pid()
-    ok = bool(pid) and _activate_pid(pid)
-    _herd_log(f"behind: prev={state.get('prev')!r} used={pid!r} ok={ok}")
+    stack = [(p, b) for p, b in (state.get("stack") or []) if subprocess.run(["kill", "-0", p], capture_output=True).returncode == 0]
+    if not stack:
+        stack = apps_above_terminal()        # Terminal is front now, so this is usually empty
+        if not stack:
+            p = front_nonterm_pid_any()
+            stack = [(p, "")] if p else []
+    for p, b in reversed(stack[1:]): _activate_pid(p, b)     # bottom-most first ...
+    ok = bool(stack) and _activate_pid(*stack[0])            # ... original top app last, verified
+    fp = frontmost_pid()
+    _herd_log(f"behind: stack={stack!r} ok={ok} front_after={fp!r}")
     state["on"] = False
-    return "group sent behind" if ok else ("! could not activate pid " + pid if pid else "! no other app to hand focus to")
+    if not stack: return "! no other app to hand focus to"
+    return f"group sent behind ({len(stack)} apps restored)" if ok else f"! could not activate {stack[0][1] or stack[0][0]} (front={fp})"
+
+def front_nonterm_pid_any():
+    """First regular non-Terminal app anywhere in the front-to-back order."""
+    out = subprocess.run(["lsappinfo", "visibleProcessList"], capture_output=True, text=True).stdout
+    names = re.findall(r'ASN:0x[0-9a-f]+-0x[0-9a-f]+-"([^"]*)"', out)
+    try: apps = json.loads(subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_APPS], capture_output=True, text=True).stdout or "[]")
+    except ValueError: return ""
+    by = {n.replace(" ", "_"): (str(p), pol, b) for n, p, pol, b in apps}
+    for n in names:
+        p, pol, b = by.get(n, ("", -1, ""))
+        if p and int(pol) == 0 and b != "com.apple.Terminal": return p
+    return ""
 
 def manager():
     import curses, signal
@@ -1001,7 +1040,8 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        gf = {"on": False, "prev": "", "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
+        _herd_log(f"manager start pid={os.getpid()} version=0.3.0")
+        gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hints", "(F) toggle focus"]]
         def wrap_items(items, width):
@@ -1040,7 +1080,9 @@ def manager():
             sel = max(0, min(sel, len(rows) - 1))
             if not gf["on"] and time.time() - gf["pt"] > 1.0:          # track last non-Terminal frontmost app
                 gf["pt"] = time.time(); fp = frontmost_pid()
-                if fp and fp != gf.setdefault("term", _terminal_pid()): gf["prev"] = fp
+                if fp and fp != gf.setdefault("term", _terminal_pid()):
+                    st = apps_above_terminal()
+                    if st: gf["stack"] = st
             if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
                 gf["t"] = time.time()
                 if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
