@@ -120,8 +120,8 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 
-The selected session's own Terminal window gets a 9px outline in the highlight bar's cyan (Terminal's
-ANSI cyan, 51/187/200), hugging the window's rounded corners (16pt on macOS 26, 10pt before;
+The selected session's own Terminal window gets a 6px outline in the selection colour (slate blue
+#005faf, the same as the selected row), hugging the window's rounded corners (16pt on macOS 26, 10pt before;
 override with `HERD_OUTLINE_PX`, `HERD_OUTLINE_RADIUS`, `HERD_OUTLINE_RGB`), drawn by a tiny helper
 (`helper/herd-outline.swift`, compiled with `swiftc` into `~/.cache/herd` on first use; skipped if
 swiftc isn't available). It's a borderless, click-through, non-activating overlay at the normal window level, kept directly

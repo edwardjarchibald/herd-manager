@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 - 2026-10-11
+
+### Changed
+- Selection colour is now white on slate blue: xterm-256 colour 25, #005faf (COLOR_BLUE on 8-colour terminals). It replaces black on cyan, which made the green attached dot look black. The dot on the selected row is drawn with its own pair (green on the selection background), so it stays green.
+- The selected-window outline uses the same colour (#005faf) and is a third thinner: 6 px instead of 9 px (`HERD_OUTLINE_RGB` / `HERD_OUTLINE_PX` still override).
+
 ## 0.5.5 - 2026-10-11
 
 ### Changed

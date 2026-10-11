@@ -368,6 +368,8 @@ def _jxa(src, arg):
     if p.returncode: sys.exit("osascript: " + p.stderr.strip())
     return p.stdout.strip()
 
+SEL_256 = 25            # selection colour: xterm-256 #25 = #005faf (slate blue); outline uses the same RGB
+SEL_RGB = "0 95 175"
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
 MGR_W = 520
 
@@ -919,11 +921,10 @@ class Outline:
             if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
                 os.makedirs(os.path.dirname(binp), exist_ok=True)
                 if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
-            # 9px ring in Terminal's ANSI cyan (51,187,200: the manager's highlight bar uses COLOR_CYAN;
-            # the Pro profile doesn't override it). Corner radius follows the OS (16 on macOS 26).
-            rgb = os.environ.get("HERD_OUTLINE_RGB", "51 187 200").split()
+            # 6px ring in the selection colour (SEL_RGB).
+            rgb = os.environ.get("HERD_OUTLINE_RGB", SEL_RGB).split()
             radius = os.environ.get("HERD_OUTLINE_RADIUS", "16" if int(os.uname().release.split(".")[0]) >= 25 else "10")
-            self.p = subprocess.Popen([binp, os.environ.get("HERD_OUTLINE_PX", "9"), radius, *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            self.p = subprocess.Popen([binp, os.environ.get("HERD_OUTLINE_PX", "6"), radius, *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, text=True)
         except (OSError, subprocess.SubprocessError): self.p = None
     def _send(self, line):
@@ -1136,7 +1137,9 @@ def manager():
         stub_open = os.environ.get("HERD_TEST_STUB_OPEN"); state_file = os.environ.get("HERD_TEST_STATE")
         try:
             curses.init_pair(1, curses.COLOR_CYAN, -1); curses.init_pair(2, curses.COLOR_GREEN, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1); curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1); SEL_BG = SEL_256 if curses.COLORS >= 256 else curses.COLOR_BLUE
+            curses.init_pair(4, curses.COLOR_WHITE, SEL_BG)                 # selected row: white on slate blue
+            curses.init_pair(7, curses.COLOR_GREEN, SEL_BG)                 # its dot stays green
             curses.init_pair(5, curses.COLOR_RED, -1); curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
@@ -1189,7 +1192,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.5")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.6")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
@@ -1250,7 +1253,9 @@ def manager():
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
-                if idx == sel: put(y, 0, (line + sub).ljust(W - 1), attr)
+                if idx == sel:
+                    put(y, 0, (line + sub).ljust(W - 1), attr)
+                    put(y, 1, mark, C(7) | curses.A_BOLD)                # own pair: green dot on the selection bg
                 else: put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
             py = H - 1                                   # the one bottom line
             pfx = " > "
