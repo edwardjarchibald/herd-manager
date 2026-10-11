@@ -381,15 +381,18 @@ def docked():
     return d if d.get("pid") else None
 
 def dock_layout(x, y, w, h, n, gap=GAP):
-    """Dock on: left column = manager on top (MGR_W wide, upper 40%) + dock below it (lower 60%,
-    max(MGR_W, 30% of the display width) wide, so a Grok Bot-sized window fits). Terminals: even grid
-    in the rest to the right. Returns (manager rect, terminal rects, dock rect, terminal area)."""
-    cw = max(MGR_W, round(w * 0.3))
-    mh = round((h - 3 * gap) * 0.4)
-    m = (x + gap, y + gap, x + gap + MGR_W, y + gap + mh)
-    d = (x + gap, y + 2 * gap + mh, x + gap + cw, y + h - gap)
-    area = (x + gap + cw, y, w - gap - cw, h)
-    return m, grid(*area, n, gap), d, area
+    """Dock on: fixed 5x3 grid of equal cells over the whole tiled area.
+    (r1,c1) manager; dock = 2x2 block c1-c2 x r2-r3; terminals fill r1 c2-c5, then c3-c5 x r2-r3
+    (10 cells). Fewer terminals leave cells empty (grid stays fixed). More than 10: even grid over the
+    right three columns (c3-c5, full height). Returns (manager, terminal rects, dock, terminal area)."""
+    cw = (w - 6 * gap) / 5; ch = (h - 4 * gap) / 3
+    L = lambda c: x + gap + c * (cw + gap); T = lambda r: y + gap + r * (ch + gap)
+    cell = lambda r, c, rs=1, cs=1: (round(L(c)), round(T(r)), round(L(c + cs - 1) + cw), round(T(r + rs - 1) + ch))
+    m = cell(0, 0); d = cell(1, 0, 2, 2)
+    slots = [cell(0, c) for c in range(1, 5)] + [cell(r, c) for r in (1, 2) for c in range(2, 5)]
+    area = (round(L(2)) - gap, y, round(L(4) + cw) + gap - (round(L(2)) - gap), h)   # c3-c5, full height
+    rects = slots[:n] if n <= 10 else grid(*area, n, gap)
+    return m, rects, d, area
 
 def tile(quiet=False):
     recs = _locked(lambda d: dict(d))
@@ -1115,7 +1118,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.4.1")
+        _herd_log(f"manager start pid={os.getpid()} version=0.4.2")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hints", "(F) toggle focus"]]

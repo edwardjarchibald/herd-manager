@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2 - 2026-10-11
+
+### Changed
+- New dock-on layout: a fixed 5x3 grid of equal cells over the whole tiled area.
+  - (r1,c1) is the manager, the same size as a terminal cell. At 2560x1440 that is about 48x19 characters; the hints wrap to three lines.
+  - The dock is the 2x2 block c1-c2 x r2-r3, including the gaps.
+  - Terminals fill r1 c2-c5 first, then c3-c5 x r2-r3: 10 slots. With fewer terminals the remaining cells stay empty, and the grid never stretches.
+  - More than 10: an even grid over c3-c5 at full height. r1 c2 stays empty and the manager and dock are unchanged.
+- Z zooms to 80% of the c3-c5 area (full height), centered, off the manager and dock. Dock-off mode is unchanged.
+
 ## 0.4.1 - 2026-10-11
 
 ### Fixed

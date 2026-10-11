@@ -64,9 +64,21 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 
 ### Dock area
 
-With the dock on (the default), the left column is the manager on top (520 px wide, upper ~40%) and the
-**dock** under it (lower ~60%, max(520 px, 30% of the display width) wide). Terminals (up to 8) tile in the
-even grid to the right and never under the dock. Z zooms within that terminal area.
+With the dock on (the default), the tiled area is a fixed **5x3 grid** of equal cells:
+
+```
++-------+-------+-------+-------+-------+
+|  mgr  |  t1   |  t2   |  t3   |  t4   |
++-------+-------+-------+-------+-------+
+|               |  t5   |  t6   |  t7   |
+|     dock      +-------+-------+-------+
+|               |  t8   |  t9   |  t10  |
++---------------+-------+-------+-------+
+```
+
+Up to 10 terminals fill t1..t10 in order. Unused cells stay empty (the grid doesn't stretch). With more
+than 10, the terminals share an even grid over the right three columns. Z zooms to 80% of the right three
+columns, centered.
 
 - The empty dock shows a faint dashed outline while Terminal is active.
 - Drag any app window (e.g. Grok Bot) so its center is over the dock. The outline turns bright with
