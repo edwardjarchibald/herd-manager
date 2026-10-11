@@ -14,6 +14,7 @@ into any session by name, and closing a window never kills the session.
 - macOS with Terminal.app
 - [herdr](https://herdr.dev) (0.9.x) with its background server
 - python3 (the Xcode Command Line Tools one is fine; stdlib only)
+- optional: `swiftc` (Xcode Command Line Tools) for the green window outline
 
 No window manager and no Accessibility permission are needed. herd talks to Terminal through its
 AppleScript dictionary, so macOS asks once for permission to control Terminal.
@@ -79,6 +80,13 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 | click the list | Leave live broadcast |
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
+
+The selected session's own Terminal window gets a green outline, drawn by a tiny helper
+(`helper/herd-outline.swift`, compiled with `swiftc` into `~/.cache/herd` on first use; skipped if
+swiftc isn't available). It's a borderless, click-through, non-activating overlay that never takes
+focus and needs no Accessibility permission. It follows the window's bounds about once a second, hides
+when that window isn't on screen (another Space, minimized, under a fullscreen app), and exits with the
+manager. Set `HERD_NO_OUTLINE=1` to disable it.
 
 ## Session names
 

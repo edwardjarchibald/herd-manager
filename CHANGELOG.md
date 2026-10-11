@@ -11,8 +11,9 @@
 - Detail line / `herd ls` CWD column: `<repo>/<branch>` inside git, else the cwd with `~`.
 - Names may contain `/`, `~`, spaces and parentheses; commands accept unique name prefixes; window
   commands are shell-quoted and windows attach by workspace id.
-- Manager: Shift-Enter (CSI 13;2u, CSI 27;2;13~, ESC CR) creates a session like `N`; the selected
-  session is drawn with a green rounded outline instead of a highlight bar.
+- Manager: Shift-Enter (CSI 13;2u, CSI 27;2;13~, ESC CR) creates a session like `N`.
+- The selected session's Terminal window gets a green outline from a small click-through,
+  non-activating Swift overlay helper (`helper/herd-outline.swift`); `HERD_NO_OUTLINE=1` disables it.
 
 ## 0.1.1 (2026-10-11)
 

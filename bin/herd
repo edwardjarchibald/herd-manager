@@ -26,6 +26,7 @@ Test hooks (environment variables, for headless testing of `herd manager`; unset
   HERD_TEST_DUMP=<file>     write a plain-text dump of the screen after each frame
   HERD_TEST_KEYLOG=<file>   append the last key code after each frame
   HERD_TEST_STUB_OPEN=<f>   log Enter/double-click opens instead of opening windows
+  HERD_NO_OUTLINE=1         don't start the green window-outline helper
 """
 import json, os, re, shlex, subprocess, sys, time, fcntl
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
@@ -670,6 +671,43 @@ def sessions():
                      "cmd": cmd, "agent": p.get("agent_status", "")})
     return rows
 
+class Outline:
+    """Green border around the selected session's herd window, drawn by a tiny Swift helper
+    (helper/herd-outline.swift, compiled on first use into ~/.cache/herd). Click-through and
+    non-activating; it exits when this pipe closes (manager quit/reload)."""
+    def __init__(self):
+        self.p = None; self.last = None; self.t = 0.0
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-outline.swift")
+        binp = os.path.expanduser("~/.cache/herd/herd-outline")
+        try:
+            if not os.path.exists(src): return
+            if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
+                os.makedirs(os.path.dirname(binp), exist_ok=True)
+                if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
+            self.p = subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, text=True)
+        except (OSError, subprocess.SubprocessError): self.p = None
+    def _send(self, line):
+        if not self.p or line == self.last: return
+        try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
+        except (OSError, ValueError): self.p = None
+    def follow(self, name, force=False):
+        """Point the border at session `name`'s recorded window (or hide). Polls bounds ~1/s."""
+        if not self.p: return
+        if not force and time.time() - self.t < 1.0: return
+        self.t = time.time()
+        r = _locked(lambda d: d.get(name)) if name else None
+        if not r: self._send("hide"); return
+        q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
+                           capture_output=True, text=True)
+        b = [x.strip() for x in q.stdout.split(",")]
+        self._send(" ".join(b) if q.returncode == 0 and len(b) == 4 else "hide")
+    def stop(self):
+        if self.p:
+            try: self.p.stdin.close()
+            except OSError: pass
+            self.p = None
+
 def manager():
     import curses, signal
     if os.environ.get("HERD_TEST_SANDBOX"):   # headless tests: fake rows, every mutation only logged
@@ -722,6 +760,8 @@ def manager():
             curses.endwin()
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
+        outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") else None
+        sel_seen = [None]
         CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
         SHIFT_ENTER = 0x5E00   # private code for Shift-Enter
         CSI_MAP = {"13;2u": SHIFT_ENTER, "27;2;13~": SHIFT_ENTER, "13;2~": SHIFT_ENTER, "2M": SHIFT_ENTER,"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
@@ -791,26 +831,23 @@ def manager():
                 except Exception as e: msg = f"! {e}"
                 last = time.time()
             sel = max(0, min(sel, len(rows) - 1))
+            if outline:
+                cur_name = rows[sel]["name"] if rows else None
+                outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
             scr.erase(); H, W = scr.getmaxyx()
             put(0, 1, "herd", C(1) | curses.A_BOLD); put(0, 6, f"{len(rows)} sessions  {time.strftime('%H:%M:%S')}", curses.A_DIM)
             help_lines = wrap_items(HELP, max(1, W - 2)) if show_help[0] else []
             foot_h = 1 + len(help_lines) + 3   # status + hints + divider + 2-line broadcast prompt
-            LB = 1                                   # list base row (row 0 = header)
-            list_h = max(1, (H - LB - 1 - foot_h) // 3)  # 3 rows per entry + 1 closing border row
+            list_h = max(1, (H - 2 - foot_h) // 2)
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
-            inner = max(4, W - 5)                    # text width inside the outline
             for i, r in enumerate(rows[top:top + list_h]):
-                y = LB + i * 3 + 1; idx = top + i       # name row; detail row y+1; borders y-1 and y+2
+                y = 2 + i * 2; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
-                attr = curses.A_BOLD | (C(2) if r["window"] else 0) if idx == sel else (C(2) if r["window"] else curses.A_NORMAL)
-                put(y, 2, f"{mark} {r['name']}"[:inner], attr)
-                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}"[:inner - 2], curses.A_DIM)
-                if idx == sel and W >= 8:
-                    g = C(2) | curses.A_BOLD; bw = W - 2
-                    put(y - 1, 0, "\u256d" + "\u2500" * (bw - 2) + "\u256e", g)
-                    put(y + 2, 0, "\u2570" + "\u2500" * (bw - 2) + "\u256f", g)
-                    for yy in (y, y + 1): put(yy, 0, "\u2502", g); put(yy, bw - 1, "\u2502", g)
+                attr = C(4) | curses.A_BOLD if idx == sel else (C(2) if r["window"] else curses.A_NORMAL)
+                line = f" {mark} {r['name']}"
+                put(y, 0, line.ljust(W - 1) if idx == sel else line, attr)
+                put(y + 1, 4, f"{r['cwd']}  {r['cmd']}", curses.A_DIM)
             y0 = H - 1 - len(help_lines)            # first hint row
             py = y0 - 2                              # broadcast area: rows py, py+1
             pfx = " > "; room = max(1, W - len(pfx) - 2)
@@ -886,8 +923,8 @@ def manager():
                         try: bc["n"] = len(attached_names())
                         except Exception: bc["n"] = 0
                         bc["focus"] = True; bc["echo"] = ""; msg = ""; continue
-                    if my <= LB or (my - LB - 1) % 3 == 2 or (my - LB - 1) // 3 >= list_h: continue
-                    idx = top + (my - LB - 1) // 3
+                    if my < 2 or (my - 2) // 2 >= list_h: continue
+                    idx = top + (my - 2) // 2
                     if idx >= len(rows): continue
                     now = time.time()
                     dbl = bool(bs & curses.BUTTON1_DOUBLE_CLICKED) or (lastclick[1] == idx and now - lastclick[0] < DBL)
@@ -922,7 +959,8 @@ def manager():
                     msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"
             except Exception as e: msg = f"! {e}"
-    os.environ.setdefault("ESCDELAY", "25")   # Esc leaves the broadcast prompt without a 1s lag
+    os.environ.setdefault("ESCDELAY", "25")
+    # (the outline helper exits by itself when the manager's pipe closes)   # Esc leaves the broadcast prompt without a 1s lag
     try: curses.wrapper(ui)
     finally:
         if in_window: cleanup()
