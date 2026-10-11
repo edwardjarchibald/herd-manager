@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - 2026-10-11
+
+### Added
+- **Dock area** in the lower left, directly under the manager. With the dock on, the left column is the manager (MGR_W = 520 px wide, upper ~40%) above the dock (lower ~60%, max(520, 30% of the display width) wide; 768x800 on a 2560x1440 display). Up to 8 terminals tile in the even grid to the right and never under the dock. Z zooms within that terminal area.
+- New helper `helper/herd-dock.swift`, compiled on first use into `~/.cache/herd/herd-dock` and started by the manager. It is click-through and never takes focus, and it exits with the manager.
+  - It shows a faint dashed outline while the dock is empty and Terminal is active.
+  - Every 0.1 s it reads window bounds from CGWindowList (bounds only).
+  - A non-Terminal window whose frame changes while the mouse button is down, with its center inside the area, turns the outline bright with "docking activated".
+  - On release, once the frame has been stable for 0.35 s, it moves/resizes that one window to fill the area (Accessibility AXPosition/AXSize) and records it in `~/.config/herd/dock.json` (pid, bundle, window id).
+  - Dragging it out (center leaves the area), closing it, or quitting the app undocks it.
+- The docked app is kept above the group: after a retile and after F-on, herd activates the docked app, then re-activates Terminal for the manager only, so the manager keeps keyboard focus. F excludes the docked app: F-on leaves it visible, and F-behind restores the other apps, with the docked app just under the original top app.
+- `~/.config/herd/config.json`: `{"dock": false}` turns the dock off (manager full column height, tiling as before). The default is on.
+
 ## 0.3.0 - 2026-10-11
 
 ### Changed

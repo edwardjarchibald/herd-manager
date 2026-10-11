@@ -364,6 +364,33 @@ def layout(x, y, w, h, n, manager=False, gap=GAP):
     m = (x + gap, y + gap, x + gap + MGR_W, y + h - gap)
     return m, grid(x + gap + MGR_W, y, w - gap - MGR_W, h, n, gap)
 
+CFGFILE = os.path.expanduser("~/.config/herd/config.json")
+DOCK_AREA = os.path.expanduser("~/.config/herd/dock-area.json")
+DOCK_STATE = os.path.expanduser("~/.config/herd/dock.json")
+
+def config():
+    """~/.config/herd/config.json, e.g. {"dock": false}. Missing file/keys = defaults (dock on)."""
+    try: c = json.load(open(CFGFILE))
+    except Exception: c = {}
+    return {"dock": c.get("dock", True) is not False}
+
+def docked():
+    """{"pid","bundle","wid"} of the window docked by herd-dock, or None."""
+    try: d = json.load(open(DOCK_STATE))
+    except Exception: return None
+    return d if d.get("pid") else None
+
+def dock_layout(x, y, w, h, n, gap=GAP):
+    """Dock on: left column = manager on top (MGR_W wide, upper 40%) + dock below it (lower 60%,
+    max(MGR_W, 30% of the display width) wide, so a Grok Bot-sized window fits). Terminals: even grid
+    in the rest to the right. Returns (manager rect, terminal rects, dock rect, terminal area)."""
+    cw = max(MGR_W, round(w * 0.3))
+    mh = round((h - 3 * gap) * 0.4)
+    m = (x + gap, y + gap, x + gap + MGR_W, y + gap + mh)
+    d = (x + gap, y + 2 * gap + mh, x + gap + cw, y + h - gap)
+    area = (x + gap + cw, y, w - gap - cw, h)
+    return m, grid(*area, n, gap), d, area
+
 def tile(quiet=False):
     recs = _locked(lambda d: dict(d))
     if not recs: return
@@ -385,17 +412,25 @@ def tile(quiet=False):
     same = [n for n in order if n != zoomed and screen_of(win(n)) == target]
     has_mgr = MGR in alive and (not order or screen_of(win(MGR)) in (target, None))
     mrect, rects = layout(*target, len(same), manager=has_mgr)
+    gx, gy, gw, gh = target
+    if has_mgr: gx, gw = gx + GAP + MGR_W, gw - GAP - MGR_W
+    dock_rect, term_area = None, (gx, gy, gw, gh)
+    if config()["dock"]:
+        m2, rects, dock_rect, term_area = dock_layout(*target, len(same))
+        if has_mgr: mrect = m2
+        tmp = DOCK_AREA + ".tmp"; json.dump({"area": list(dock_rect)}, open(tmp, "w")); os.replace(tmp, DOCK_AREA)
+    elif os.path.exists(DOCK_AREA): os.remove(DOCK_AREA)
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
-    if zoomed:   # ~80% of the grid area (right of the manager), centered
-        x, y, w, h = target
-        if has_mgr: x, w = x + GAP + MGR_W, w - GAP - MGR_W
+    if zoomed:   # ~80% of the terminal area (right of the manager/dock column), centered
+        x, y, w, h = term_area
         zw, zh = round(w * 0.8), round(h * 0.8)
         l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
         moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
     _jxa(JXA_SET, moves)
     if zoomed: raise_behind_manager(alive[zoomed]["wid"])      # zoomed stays on top of Terminal's stack
+    if dock_rect: dock_raise()
     if not quiet:
         print(f"tile: {len(alive)} herd window(s) tracked, {len(same)} on target display"
               f"{' + manager' if has_mgr else ''}, {changed} moved, {len(dead)} pruned")
@@ -783,6 +818,20 @@ def sessions():
                      "cmd": cmd, "agent": p.get("agent_status", "")})
     return rows
 
+def start_dock():
+    """Launch helper/herd-dock.swift (compiled on first use into ~/.cache/herd): dock outline overlay +
+    drop detection. It exits when the returned pipe closes. None if disabled/unavailable."""
+    if not config()["dock"]: return None
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-dock.swift")
+    binp = os.path.expanduser("~/.cache/herd/herd-dock")
+    try:
+        if not os.path.exists(src): return None
+        if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
+            os.makedirs(os.path.dirname(binp), exist_ok=True)
+            if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return None
+        return subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError): return None
+
 class Outline:
     """Green border around the selected session's herd window, drawn by a tiny Swift helper
     (helper/herd-outline.swift, compiled on first use into ~/.cache/herd). Click-through and
@@ -845,6 +894,26 @@ def mgr_zoom(cur, outline=None):
         if outline and z: outline.follow(cur, force=True)
     return f"{cur}: not attached" if z is None else f"zoom {z}: {cur}"
 
+JXA_ACT_KEY = """ObjC.import('AppKit');
+function run(argv){ var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(argv[0]));
+  if (a.isNil()) return 'gone'; a.activateWithOptions($.NSApplicationActivateIgnoringOtherApps); return 'ok'; }"""
+
+def dock_raise():
+    """Keep the docked window above the herd group. Only when Terminal is the active app (otherwise
+    the docked app's window already sits above Terminal's): activate the docked app (its window comes
+    up), then re-activate Terminal WITHOUT all-windows, so only the manager (key window) returns to
+    the front and keeps keyboard focus. The dock doesn't overlap the manager column."""
+    d = docked()
+    if not d: return
+    term = _terminal_pid()
+    if not term or frontmost_pid() != term: return
+    if subprocess.run(["kill", "-0", str(d["pid"])], capture_output=True).returncode: return
+    subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, str(d["pid"])], capture_output=True)
+    m = _locked(lambda x: x.get(MGR))
+    if m: subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then set index of window id {int(m["wid"])} to 1'], capture_output=True)
+    subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, term], capture_output=True)
+    _herd_log(f"dock_raise pid={d['pid']}")
+
 def raise_behind_manager(wid):
     """Bring a herd window to the top of Terminal's own window stack while the manager stays the
     front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
@@ -868,11 +937,11 @@ def apps_above_terminal():
     except ValueError: return []
     by_name = {}
     for n, pid, pol, bid in apps: by_name.setdefault(n.replace(" ", "_"), (str(pid), pol, bid))
-    res = []
+    res = []; d = docked(); dpid = str(d["pid"]) if d else ""
     for n in names:
         pid, pol, bid = by_name.get(n, ("", -1, ""))
         if bid == "com.apple.Terminal": break
-        if pid and int(pol) == 0: res.append((pid, bid))
+        if pid and int(pol) == 0 and pid != dpid: res.append((pid, bid))
     return res
 
 def front_nonterm_pid():
@@ -930,6 +999,7 @@ def group_focus(state):
         subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
                        capture_output=True)
         state["on"] = True
+        dock_raise()                                              # docked app stays visible above the group
         return f"group on top ({len(wids)} windows + manager)"
     stack = [(p, b) for p, b in (state.get("stack") or []) if subprocess.run(["kill", "-0", p], capture_output=True).returncode == 0]
     if not stack:
@@ -937,7 +1007,11 @@ def group_focus(state):
         if not stack:
             p = front_nonterm_pid_any()
             stack = [(p, "")] if p else []
+    d = docked()
+    if d: stack = [(p, b) for p, b in stack if p != str(d["pid"])]   # the docked app is not part of F
     for p, b in reversed(stack[1:]): _activate_pid(p, b)     # bottom-most first ...
+    if d and stack and subprocess.run(["kill", "-0", str(d["pid"])], capture_output=True).returncode == 0:
+        _activate_pid(str(d["pid"]), d.get("bundle", ""))    # docked app just under the top app
     ok = bool(stack) and _activate_pid(*stack[0])            # ... original top app last, verified
     fp = frontmost_pid()
     _herd_log(f"behind: stack={stack!r} ok={ok} front_after={fp!r}")
@@ -1009,6 +1083,7 @@ def manager():
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
         outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") else None
+        dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
         sel_seen = [None]
         CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
         CSI_MAP = {"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,

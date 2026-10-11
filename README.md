@@ -62,6 +62,29 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 | `herd names [--dry-run]` | Run one automatic-naming pass now |
 | `herd app` | What Herd Terminal runs: manager (if needed) + new session |
 
+### Dock area
+
+With the dock on (the default), the left column is the manager on top (520 px wide, upper ~40%) and the
+**dock** under it (lower ~60%, max(520 px, 30% of the display width) wide). Terminals (up to 8) tile in the
+even grid to the right and never under the dock. Z zooms within that terminal area.
+
+- The empty dock shows a faint dashed outline while Terminal is active.
+- Drag any app window (e.g. Grok Bot) so its center is over the dock. The outline turns bright with
+  "docking activated". Let go, and that window is moved and resized to fill the dock.
+- Drag it out again (center leaves the dock) to undock it.
+- The docked window stays above the herd group, including after retiles and F. F never pushes it behind.
+- Only the one window you drop in is ever moved. Herd reads other windows' bounds only to notice a drag.
+- Resizing needs Accessibility for Terminal (System Settings > Privacy & Security > Accessibility).
+- State is kept in `~/.config/herd/dock.json` and the area in `~/.config/herd/dock-area.json` (written by `herd tile`).
+
+Config file `~/.config/herd/config.json` (JSON):
+
+```json
+{"dock": false}
+```
+
+turns the dock off: the manager gets its full column height and tiling works as before.
+
 ### Manager keys
 
 Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
