@@ -70,16 +70,16 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 |---|---|
 | `↑`/`↓`, `j`/`k`, wheel | Move the selection |
 | click | Select a session |
-| `Enter` | Open the session (tiled) or raise its window, without activating Terminal; the manager keeps focus |
+| `O` | Open the session (tiled) or raise its window, without activating Terminal; the manager keeps focus |
 | `N` | New session and window (also without activating Terminal) |
 | `X` | Detach: close the window, keep the session |
 | `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
-| `H` | Hide/show the key reminder |
+| `H` | Toggle the key hints |
 | `Q` | Quit the manager (sessions keep running) |
-| click `>` | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once) |
-| click the list | Leave live broadcast |
+| click `> click for broadcast` | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once) |
+| click the list | End live broadcast (shown in yellow while live) |
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 
@@ -145,7 +145,7 @@ herdr pane send-keys "$P" ctrl+c                  # send keys
 
 - **Nothing happens on click / "not allowed to send keystrokes"**: allow the app under *System Settings →
   Privacy & Security → Automation → Terminal*.
-- **Keys go to a session instead of the manager**: the session window has focus (after Enter or a
+- **Keys go to a session instead of the manager**: the session window has focus (after O or a
   Dock click). Click the manager window.
 - **Windows didn't re-fit**: run `herd tile`.
 - **Closed window left a stale slot**: `herd tile` prunes ids of windows that no longer exist.

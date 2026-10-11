@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.7 - 2026-10-11
+
+### Changed
+- Hints cleaned up to exactly two lines: `(N) new  (O) open  (X) detach  (Z) toggle zoom` / `(Q) quit  (K) kill  (A) killall  (H) toggle hints`. They wrap only when the window is too narrow.
+- Broadcast area: a dim `> click for broadcast` when idle. When live it shows a bright `> ` and a yellow `click list to end broadcast` below.
+- `O` opens the selected session (non-activating). It replaces Enter, which does nothing in list mode (live broadcast still forwards Enter).
+
 ## 0.2.6 - 2026-10-11
 
 ### Fixed
