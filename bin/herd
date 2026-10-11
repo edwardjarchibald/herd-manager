@@ -368,11 +368,15 @@ CFGFILE = os.path.expanduser("~/.config/herd/config.json")
 DOCK_AREA = os.path.expanduser("~/.config/herd/dock-area.json")
 DOCK_STATE = os.path.expanduser("~/.config/herd/dock.json")
 
+DOCK_MIN_W = 920   # default minimum dock/left-panel width (Grok Bot's window measured 916 px)
+
 def config():
     """~/.config/herd/config.json, e.g. {"dock": false}. Missing file/keys = defaults (dock on)."""
     try: c = json.load(open(CFGFILE))
     except Exception: c = {}
-    return {"dock": c.get("dock", True) is not False}
+    try: mw = int(c.get("dock_min_width", DOCK_MIN_W))
+    except (TypeError, ValueError): mw = DOCK_MIN_W
+    return {"dock": c.get("dock", True) is not False, "dock_min_width": mw}
 
 def docked():
     """{"pid","bundle","wid"} of the window docked by herd-dock, or None."""
@@ -402,10 +406,10 @@ def span_grid(x, y, w, h, n, gap=GAP):
     return out
 
 def dock_layout(x, y, w, h, n, gap=GAP):
-    """Dock on: left panel = 30% of the tiled width. Manager on top, exactly one row of a 3-row grid
+    """Dock on: left panel = max(30% of the tiled width, dock_min_width). Manager on top, exactly one row of a 3-row grid
     (so its bottom lines up with terminal row 1 at 7-9 terminals); dock = rest of the panel below.
     Terminals: span_grid() in the area to the right. Returns (manager, terminal rects, dock, terminal area)."""
-    lw = round(w * 0.3)
+    lw = max(round(w * 0.3), config()["dock_min_width"])
     rh = (h - 4 * gap) / 3
     m = (x + gap, y + gap, x + gap + lw, round(y + gap + rh))
     d = (x + gap, round(y + 2 * gap + rh), x + gap + lw, y + h - gap)
@@ -1156,7 +1160,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.0")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.1")
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open", "(X) detach", "(Z) toggle zoom"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]

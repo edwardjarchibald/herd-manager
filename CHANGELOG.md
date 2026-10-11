@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 - 2026-10-11
+
+### Changed
+- The dock-mode left panel (manager and dock) is now max(30% of the tiled width, `dock_min_width`), so a docked Grok Bot keeps its width and bot names stay visible. `dock_min_width` lives in `~/.config/herd/config.json` and defaults to 920 (Grok Bot's window measured 916 px). Terminals take the rest.
+
 ## 0.5.0 - 2026-10-11
 
 ### Changed

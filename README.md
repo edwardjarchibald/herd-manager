@@ -64,7 +64,7 @@ The installer symlinks `bin/herd` into `~/.local/bin` (it warns if that isn't on
 
 ### Dock area
 
-With the dock on (the default), the left panel is 30% of the tiled width: the manager on top (exactly one
+With the dock on (the default), the left panel is max(30% of the tiled width, `dock_min_width`): the manager on top (exactly one
 row of a 3-row grid) and the dock below it. Terminals tile adaptively in the area to the right:
 
 ```
@@ -92,10 +92,12 @@ largest font (Monaco, up to 16) that fits all of them plus the divider and broad
 Config file `~/.config/herd/config.json` (JSON):
 
 ```json
-{"dock": false}
+{"dock": true, "dock_min_width": 920}
 ```
 
-turns the dock off: the manager gets its full column height and tiling works as before.
+- `dock`: `false` turns the dock off. The manager gets its full column height and tiling works as before.
+- `dock_min_width`: the minimum width of the left panel (manager and dock) in px. The default is 920, wide
+  enough for Grok Bot's window so bot names show.
 
 ### Manager keys
 
