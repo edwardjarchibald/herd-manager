@@ -124,7 +124,7 @@ herd also understands `ESC [27;2;13~` and `ESC CR`. `N` always works.
 Sessions are addressable by name through herdr:
 
 ```sh
-P=$(herd id dev-3)
+P=$(herd id myrepo/main)
 herdr pane read "$P" --source recent --lines 50   # read output
 herdr pane run "$P" 'make test'                   # type a command + Enter
 herdr pane send-text "$P" 'partial'               # type without Enter

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """herd: one plain Terminal.app window per herdr terminal.
 Name = herdr workspace label (stored in herdr itself; no side file).
-  herd new [name]   create workspace+terminal (default next free dev-N), print name + ids
+  herd new [name]   create workspace+terminal (default: automatic name), print name + ids
   herd ls           list name, terminal id, pane id, cwd, foreground command
   herd open <name>  open a Terminal.app window titled <name> running `herdr terminal attach <id>`
   herd kill <name>  close the herdr workspace
