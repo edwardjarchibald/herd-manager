@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 (2026-10-11)
+
+- Removed double-click-to-open; a single click selects.
+- Manager Enter and N never activate Terminal: a new window opens without `activate` and is tiled,
+  an existing one is raised within Terminal behind the manager, the manager keeps keyboard focus and
+  the outline follows. If macOS activates Terminal anyway, the previously frontmost app is re-fronted
+  (NSRunningApplication via JXA; no Accessibility). The Dock app still activates Terminal.
+
 ## 0.2.2 (2026-10-11)
 
 - Outline overlay now lives at the normal window level, ordered directly above the selected

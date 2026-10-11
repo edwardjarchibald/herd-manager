@@ -25,7 +25,7 @@ Test hooks (environment variables, for headless testing of `herd manager`; unset
   HERD_TEST_STATE=<file>    write selection/focus/help state after each frame
   HERD_TEST_DUMP=<file>     write a plain-text dump of the screen after each frame
   HERD_TEST_KEYLOG=<file>   append the last key code after each frame
-  HERD_TEST_STUB_OPEN=<f>   log Enter/double-click opens instead of opening windows
+  HERD_TEST_STUB_OPEN=<f>   log Enter opens instead of opening windows
   HERD_NO_OUTLINE=1         don't start the green window-outline helper
 """
 import json, os, re, shlex, subprocess, sys, time, fcntl
@@ -441,15 +441,37 @@ def manager_window(tile_after=True):
     _locked(lambda d: d.__setitem__(MGR, {"wid": wid, "created": time.time(), "role": "manager"}))
     if tile_after: tile(quiet=True)
 
-def open_(name, quiet=False, keep_manager_focus=False):
+JXA_FRONT = "ObjC.import('AppKit'); var a = $.NSWorkspace.sharedWorkspace.frontmostApplication; a.isNil() ? '' : a.processIdentifier"
+JXA_REFRONT = """ObjC.import('AppKit');
+function run(argv){ var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(argv[0]));
+  if (!a.isNil()) a.activateWithOptions($.NSApplicationActivateIgnoringOtherApps); return 'ok'; }"""
+
+def frontmost_pid():
+    r = subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_FRONT], capture_output=True, text=True)
+    return r.stdout.strip()
+
+def open_(name, quiet=False, keep_manager_focus=False, background=False):
+    """Open (or raise) the session's window. background=True (manager Enter/N): never activate
+    Terminal; raise only within Terminal's stack behind the manager, and if macOS activated Terminal
+    anyway, hand the front back to the app that was frontmost before (NSRunningApplication; no
+    Accessibility needed)."""
     find(name)
     r = recorded(name)
-    if r: focus_window(r["wid"]); return
+    if r:
+        if background: raise_behind_manager(r["wid"])
+        else: focus_window(r["wid"])
+        return
     w_, _ = find(name); name = w_["label"]
-    wid = _open_window(f"clear; exec {shlex.quote(os.path.abspath(sys.argv[0]))} attach {shlex.quote(w_['workspace_id'])}", name)
+    before = frontmost_pid() if background else ""
+    wid = _open_window(f"clear; exec {shlex.quote(os.path.abspath(sys.argv[0]))} attach {shlex.quote(w_['workspace_id'])}",
+                       name, activate=not background)
     _locked(lambda d: d.__setitem__(name, {"wid": wid, "created": time.time(), "role": "session", "ws": w_["workspace_id"]}))
     tile(quiet=quiet)
-    if keep_manager_focus: refocus_manager()
+    if background:
+        raise_behind_manager(wid)                       # manager back on top of Terminal's stack (key)
+        if before and frontmost_pid() != before:
+            subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT, before], capture_output=True)
+    elif keep_manager_focus: refocus_manager()
 
 def attach(name):
     """Runs inside the herd window. Not exec'd so cleanup runs on detach or on
@@ -761,11 +783,10 @@ def manager():
     def ui(scr):
         curses.curs_set(0); scr.timeout(250); curses.use_default_colors(); curses.raw()
         # Mouse: ncurses enables xterm mode 1000 (X10 encoding), which Terminal.app sends with
-        # TERM=xterm-256color. mouseinterval(0) = no click-resolution delay; double-click is
-        # detected here (same row twice within DBL s). Wheel up = BUTTON4_PRESSED; on this
+        # TERM=xterm-256color. mouseinterval(0) = no click-resolution delay.
+        # Wheel up = BUTTON4_PRESSED; on this
         # ncurses (6.0, ABI 5) wheel down arrives as REPORT_MOUSE_POSITION.
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION); curses.mouseinterval(0)
-        DBL = 0.4; lastclick = [0.0, -1]
         stub_open = os.environ.get("HERD_TEST_STUB_OPEN"); state_file = os.environ.get("HERD_TEST_STATE")
         try:
             curses.init_pair(1, curses.COLOR_CYAN, -1); curses.init_pair(2, curses.COLOR_GREEN, -1)
@@ -822,7 +843,7 @@ def manager():
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
         HELP = ["N new", "click > for live broadcast", "click list to exit", "\u23ce open", "X detach", "K kill", "A kill all",
-                "H hide help", "Q quit", "click select", "dbl-click open"]
+                "H hide help", "Q quit", "click select"]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
             lines, cur_ = [], ""
@@ -952,11 +973,7 @@ def manager():
                     if my < 2 or (my - 2) // 2 >= list_h: continue
                     idx = top + (my - 2) // 2
                     if idx >= len(rows): continue
-                    now = time.time()
-                    dbl = bool(bs & curses.BUTTON1_DOUBLE_CLICKED) or (lastclick[1] == idx and now - lastclick[0] < DBL)
-                    sel = idx; lastclick[:] = [0.0 if dbl else now, idx]
-                    if not dbl: continue
-                    do_open = True
+                    sel = idx; continue                                # single click selects
                 else: continue
             ch = chr(k) if 0 <= k < 256 else ""
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc
@@ -966,10 +983,11 @@ def manager():
                 elif ch == "H": show_help[0] = not show_help[0]
                 elif k in (curses.KEY_DOWN,) or ch == "j": sel += 1
                 elif k in (curses.KEY_UP,) or ch == "k": sel -= 1
-                elif (do_open or k in (10, 13, curses.KEY_ENTER)) and rows:
+                elif k in (10, 13, curses.KEY_ENTER) and rows:
                     cur = rows[sel]["name"]
                     if stub_open: open(stub_open, "a").write(cur + "\n")
-                    else: open_(cur, quiet=True)
+                    else: open_(cur, quiet=True, background=True)
+                    sel_seen[0] = None                                 # outline follows right away
                     msg = f"opened {cur}"; last = 0
                 elif ch == "A":
                     v = prompt(f"kill ALL {len(rows)} sessions? [y/N] ")
@@ -980,7 +998,7 @@ def manager():
                 elif ch == "N":
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
-                    if n: open_(n, quiet=True, keep_manager_focus=True); msg = f"new {n}"; last = 0
+                    if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
                 elif ch == "X" and cur:
                     msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager(); last = 0
             except SystemExit as e: msg = f"! {e}"

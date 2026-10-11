@@ -69,8 +69,8 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`.
 |---|---|
 | `↑`/`↓`, `j`/`k`, wheel | Move the selection |
 | click | Select a session |
-| `Enter` / double-click | Open the session, or bring its window to the front |
-| `N` | New session and window |
+| `Enter` | Open the session (tiled) or raise its window, without activating Terminal; the manager keeps focus |
+| `N` | New session and window (also without activating Terminal) |
 | `X` | Detach: close the window, keep the session |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
