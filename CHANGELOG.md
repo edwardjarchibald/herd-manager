@@ -4,9 +4,11 @@
 
 - Security: `herd ls` and the manager no longer show full command lines (they can contain
   secrets passed as arguments). Only the agent name or the program's basename is shown.
-- Automatic session names: `<repo>/<branch>` inside git repos/worktrees (main repo folder name;
-  short hash when detached), otherwise the cwd with `~`. Names follow cwd/branch changes, duplicates
-  get ` (2)`, manual names stick (`herd rename --auto` to undo). New `herd names [--dry-run]`.
+- Automatic session names: `<prefix>-<issue>` in linked worktrees with an issue number (prefix =
+  2-4 letter repo abbreviation, overridable in `~/.config/herd/prefixes.json`), otherwise the cwd
+  folder name (`~` for home); duplicates get `-2`. Names follow cwd/branch changes, manual names
+  stick (`herd rename --auto` to undo). New `herd names [--dry-run]`.
+- Detail line / `herd ls` CWD column: `<repo>/<branch>` inside git, else the cwd with `~`.
 - Names may contain `/`, `~`, spaces and parentheses; commands accept unique name prefixes; window
   commands are shell-quoted and windows attach by workspace id.
 - Manager: Shift-Enter (CSI 13;2u, CSI 27;2;13~, ESC CR) creates a session like `N`; the selected

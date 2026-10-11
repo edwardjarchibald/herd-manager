@@ -2,7 +2,7 @@
 
 **Named [herdr](https://herdr.dev)-backed Terminal.app sessions with auto-tiling, a session manager and csshx-style live broadcast, for macOS.**
 
-Each session is a persistent herdr terminal with a readable name (`myrepo/main`, `myrepo/issue/42-fix`, `~/Downloads`) shown in its own
+Each session is a persistent herdr terminal with a readable name (`myrepo`, `mr-42` for an issue worktree, `Downloads`) shown in its own
 plain Terminal.app window. Windows tile into an even grid; a narrow manager column lists every session.
 Because sessions live in the background herdr server, you (or a script or AI agent) can read and type
 into any session by name, and closing a window never kills the session.
@@ -84,13 +84,16 @@ The manager reloads itself when `bin/herd` changes, keeping the selection.
 
 Names follow each session's working directory automatically (the manager rechecks every 2 s):
 
-- In a git repo or worktree: `<repo>/<branch>`, where `<repo>` is the main repository's folder name
-  (also for worktrees) and `<branch>` the current branch (short commit hash when detached).
-- Elsewhere: the directory with `~` for home, e.g. `~/Downloads`.
-- Duplicates get ` (2)`, ` (3)`, …
+- In a linked git worktree whose branch (or folder) carries an issue number: `<prefix>-<issue>`,
+  e.g. `bh-6` for BlackHole issue 6. The prefix is a 2-4 letter abbreviation of the repo name
+  (origin remote name, else the main worktree folder); override it in `~/.config/herd/prefixes.json`
+  (`{"MyRepo": "mr"}`).
+- Otherwise: the cwd folder name (`~` for home). Duplicates get `-2`, `-3`, …
 - Manual names (`herd new <name>`, `herd rename`) stick until `herd rename --auto <name>`.
 
-Commands that take a name also accept a unique prefix (`herd open myrepo/iss`); quote names with spaces.
+The detail line in the manager (and the CWD column of `herd ls`) shows `<repo>/<branch>` inside git
+(main repo folder name, also for worktrees; short hash when detached), else the cwd with `~`.
+Commands that take a name also accept a unique prefix; quote names with spaces.
 
 ## Shift-Enter
 
@@ -124,7 +127,7 @@ herd also understands `ESC [27;2;13~` and `ESC CR`. `N` always works.
 Sessions are addressable by name through herdr:
 
 ```sh
-P=$(herd id myrepo/main)
+P=$(herd id mr-42)
 herdr pane read "$P" --source recent --lines 50   # read output
 herdr pane run "$P" 'make test'                   # type a command + Enter
 herdr pane send-text "$P" 'partial'               # type without Enter
