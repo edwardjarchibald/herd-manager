@@ -39,7 +39,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
     "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
-    "attention_flash":     (True,  None, "flash a session's dot yellow (~1 Hz) when its agent is done or blocked (waiting for you), until you select or focus it"),
+    "attention_highlight": (True,  None, "highlight a session's name (yellow background) when its agent is done or blocked (waiting for you), until you select it or click its window (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
@@ -55,12 +55,16 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "outline_radius":      (_OUTLINE_RADIUS_DEFAULT, "HERD_OUTLINE_RADIUS", "outline corner radius (16 on macOS 26, 10 before)"),
 }
 
+CFG_ALIASES = {"attention_highlight": "attention_flash"}   # new key -> old name still accepted
+
 def cfg(key):
     """Value of a config key: env override (if any) > config.json > default, coerced to the default's type."""
     default, env, _ = CFG_DEFAULTS[key]
     v = os.environ.get(env) if env else None
     if v is None:
-        try: v = json.load(open(CFGFILE)).get(key, default)
+        try:
+            c = json.load(open(CFGFILE))
+            v = c.get(key, c.get(CFG_ALIASES.get(key, ""), default))
         except Exception: v = default
     try:
         if v is None: return default
@@ -75,7 +79,9 @@ def write_full_config():
     try: cur = json.load(open(CFGFILE))
     except Exception: cur = {}
     out = {k: cur.get(k, d[0]) for k, d in CFG_DEFAULTS.items()}
-    out.update({k: v for k, v in cur.items() if k not in CFG_DEFAULTS and k != "_doc"})
+    for new_, old_ in CFG_ALIASES.items():
+        if old_ in cur and new_ not in cur: out[new_] = cur[old_]
+    out.update({k: v for k, v in cur.items() if k not in CFG_DEFAULTS and k != "_doc" and k not in CFG_ALIASES.values()})
     out["_doc"] = {k: d[2] + (f" (env override: {d[1]})" if d[1] else "") for k, d in CFG_DEFAULTS.items()}
     os.makedirs(os.path.dirname(CFGFILE), exist_ok=True)
     tmp = CFGFILE + ".tmp"; open(tmp, "w").write(json.dumps(out, indent=2) + "\n"); os.replace(tmp, CFGFILE)
@@ -1349,7 +1355,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.5")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.6")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
@@ -1462,7 +1468,7 @@ def manager():
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
-            cfg_flash = cfg("attention_flash")
+            cfg_hl = cfg("attention_highlight")
             for i, r in enumerate(rows[top:top + list_h]):
                 y = i; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
@@ -1470,13 +1476,13 @@ def manager():
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
-                flash = cfg_flash and r["name"] in att_on and int(time.time() * 2) % 2 == 0   # wall clock: 0.5 s on / 0.5 s off
+                hl = cfg_hl and r["name"] in att_on                       # steady highlight, no blinking
                 if idx == sel:
                     put(y, 0, (line + sub).ljust(W - 1), attr)
-                    put(y, 1, mark, (C(8) if flash else C(7)) | curses.A_BOLD)   # own pair on the selection bg
+                    put(y, 1, mark, C(7) | curses.A_BOLD)   # own pair on the selection bg
                 else:
                     put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
-                    if flash: put(y, 1, "\u25cf " + r["name"], C(3) | curses.A_BOLD | curses.A_REVERSE)   # dot+name: yellow block
+                    if hl: put(y, 3, r["name"], C(3) | curses.A_BOLD | curses.A_REVERSE)   # name only: dark on yellow
             py = H - 1                                   # the one bottom line
             pfx = " > "
             put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)

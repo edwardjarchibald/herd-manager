@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6 - 2026-10-12
+
+### Changed
+- No more flashing. A session needing attention (agent done or blocked) shows its **name** with a steady yellow background and dark text; the dot keeps its normal look. The latch/clear logic is unchanged.
+- Config key renamed to `attention_highlight` (default true); the old `attention_flash` is still accepted as an alias.
+
 ## 0.6.5 - 2026-10-12
 
 ### Fixed
