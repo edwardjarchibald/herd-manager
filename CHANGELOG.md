@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0 - 2026-10-12
+
+### Added
+- Every tunable can now be set in `~/.config/herd/config.json`: `dock`, `dock_min_width`, `dock_panel_fraction`, `zoom_dim`, `zoom_scale`, `gap`, `manager_width`, `manager_font_max`, `manager_font_min`, `selection_color_256`, `outline`, `outline_rgb`, `outline_px`, `outline_radius`. Env vars (`HERD_ZOOM_DIM`, `HERD_OUTLINE_*`, `HERD_NO_OUTLINE`) still override. The file lists all keys plus a `_doc` object with one-line descriptions. README has a Configuration table.
+
 ## 0.5.9 - 2026-10-12
 
 ### Added

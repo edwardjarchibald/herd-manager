@@ -30,6 +30,50 @@ Test hooks (environment variables, for headless testing of `herd manager`; unset
   HERD_NO_OUTLINE=1         don't start the green window-outline helper
 """
 import json, os, re, shlex, subprocess, sys, time, fcntl
+
+# ---- configuration: ~/.config/herd/config.json (plain JSON; "_doc" holds one-line descriptions) ----
+CFGFILE = os.path.expanduser("~/.config/herd/config.json")
+_OUTLINE_RADIUS_DEFAULT = 16 if int(os.uname().release.split(".")[0]) >= 25 else 10
+CFG_DEFAULTS = {   # key: (default, env override or None, description)
+    "dock":                (True,  None, "dock area under the manager (false = classic layout: manager full-height column + even grid)"),
+    "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
+    "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
+    "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
+    "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
+    "gap":                 (8,     None, "gap (px) between tiled windows and around the edges"),
+    "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
+    "manager_font_max":    (16,    None, "dock mode: largest manager font size tried (shrinks until all sessions fit)"),
+    "manager_font_min":    (9,     None, "dock mode: smallest manager font size allowed"),
+    "selection_color_256": (25,    None, "manager selected-row background, xterm-256 colour index (25 = #005faf)"),
+    "outline":             (True,  None, "draw the outline around the selected session's window (env HERD_NO_OUTLINE=1 disables)"),
+    "outline_rgb":         ("0 95 175", "HERD_OUTLINE_RGB", "outline colour 'r g b' (0-255); default = selection colour #005faf"),
+    "outline_px":          (6,     "HERD_OUTLINE_PX", "outline thickness in px"),
+    "outline_radius":      (_OUTLINE_RADIUS_DEFAULT, "HERD_OUTLINE_RADIUS", "outline corner radius (16 on macOS 26, 10 before)"),
+}
+
+def cfg(key):
+    """Value of a config key: env override (if any) > config.json > default, coerced to the default's type."""
+    default, env, _ = CFG_DEFAULTS[key]
+    v = os.environ.get(env) if env else None
+    if v is None:
+        try: v = json.load(open(CFGFILE)).get(key, default)
+        except Exception: v = default
+    try:
+        if isinstance(default, bool): return v if isinstance(v, bool) else str(v).lower() not in ("0", "false", "no", "off", "")
+        if isinstance(default, int): return int(float(v))
+        if isinstance(default, float): return float(v)
+        return str(v)
+    except (TypeError, ValueError): return default
+
+def write_full_config():
+    """Rewrite config.json listing every key (current values kept, defaults filled in) plus _doc."""
+    try: cur = json.load(open(CFGFILE))
+    except Exception: cur = {}
+    out = {k: cur.get(k, d[0]) for k, d in CFG_DEFAULTS.items()}
+    out.update({k: v for k, v in cur.items() if k not in CFG_DEFAULTS and k != "_doc"})
+    out["_doc"] = {k: d[2] + (f" (env override: {d[1]})" if d[1] else "") for k, d in CFG_DEFAULTS.items()}
+    os.makedirs(os.path.dirname(CFGFILE), exist_ok=True)
+    tmp = CFGFILE + ".tmp"; open(tmp, "w").write(json.dumps(out, indent=2) + "\n"); os.replace(tmp, CFGFILE)
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f\"'`$\\]{1,120}$")   # labels may contain / ~ spaces ( )
 
@@ -282,7 +326,7 @@ def ls():
 
 def osa_str(s): return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-GAP = 8
+GAP = cfg("gap")
 WINFILE = os.path.expanduser("~/.config/herd/windows.json")
 
 def _sess_map():
@@ -368,10 +412,10 @@ def _jxa(src, arg):
     if p.returncode: sys.exit("osascript: " + p.stderr.strip())
     return p.stdout.strip()
 
-SEL_256 = 25            # selection colour: xterm-256 #25 = #005faf (slate blue); outline uses the same RGB
-SEL_RGB = "0 95 175"
+SEL_256 = cfg("selection_color_256")           # selection colour: xterm-256 #25 = #005faf (slate blue); outline uses the same RGB
+SEL_RGB = cfg("outline_rgb")
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
-MGR_W = 520
+MGR_W = cfg("manager_width")
 
 def layout(x, y, w, h, n, manager=False, gap=GAP):
     """Manager column (fixed MGR_W, full height, top-left) + even grid in the rest."""
@@ -379,7 +423,6 @@ def layout(x, y, w, h, n, manager=False, gap=GAP):
     m = (x + gap, y + gap, x + gap + MGR_W, y + h - gap)
     return m, grid(x + gap + MGR_W, y, w - gap - MGR_W, h, n, gap)
 
-CFGFILE = os.path.expanduser("~/.config/herd/config.json")
 DOCK_AREA = os.path.expanduser("~/.config/herd/dock-area.json")
 DOCK_STATE = os.path.expanduser("~/.config/herd/dock.json")
 LAYOUT = os.path.expanduser("~/.config/herd/layout.json")       # {"term_area": [l, t, r, b]} (zoom scrim)
@@ -387,14 +430,8 @@ LAYOUT = os.path.expanduser("~/.config/herd/layout.json")       # {"term_area": 
 DOCK_MIN_W = 920   # default minimum dock/left-panel width (Grok Bot's window measured 916 px)
 
 def config():
-    """~/.config/herd/config.json, e.g. {"dock": false}. Missing file/keys = defaults (dock on)."""
-    try: c = json.load(open(CFGFILE))
-    except Exception: c = {}
-    try: mw = int(c.get("dock_min_width", DOCK_MIN_W))
-    except (TypeError, ValueError): mw = DOCK_MIN_W
-    try: zd = float(os.environ.get("HERD_ZOOM_DIM") or c.get("zoom_dim", 0.85))
-    except (TypeError, ValueError): zd = 0.85
-    return {"dock": c.get("dock", True) is not False, "dock_min_width": mw, "zoom_dim": max(0.0, min(1.0, zd))}
+    """Compat view used by the tiler/helpers (see CFG_DEFAULTS / cfg())."""
+    return {"dock": cfg("dock"), "dock_min_width": cfg("dock_min_width"), "zoom_dim": max(0.0, min(1.0, cfg("zoom_dim")))}
 
 def docked():
     """{"pid","bundle","wid"} of the window docked by herd-dock, or None."""
@@ -434,14 +471,14 @@ def dock_layout(x, y, w, h, n, gap=GAP):
     """Dock on: left panel = max(30% of the tiled width, dock_min_width). Manager on top, exactly one row of a 3-row grid
     (so its bottom lines up with terminal row 1 at 7-9 terminals); dock = rest of the panel below.
     Terminals: span_grid() in the area to the right. Returns (manager, terminal rects, dock, terminal area)."""
-    lw = max(round(w * 0.3), config()["dock_min_width"])
+    lw = max(round(w * cfg("dock_panel_fraction")), cfg("dock_min_width"))
     rh = (h - 4 * gap) / 3
     m = (x + gap, y + gap, x + gap + lw, round(y + gap + rh))
     d = (x + gap, round(y + 2 * gap + rh), x + gap + lw, y + h - gap)
     area = (x + gap + lw, y, w - gap - lw, h)
     return m, span_grid(*area, n, gap), d, area
 
-def fit_manager_font(wid, maxfs=16, minfs=9):
+def fit_manager_font(wid, maxfs=None, minfs=None):
     """Largest Monaco size <= maxfs at which the manager shows every session on one line plus the
     divider and broadcast line (n + 2 rows). Only the manager window's own tab is changed."""
     try: need = max(1, len(workspaces())) + 2
@@ -454,6 +491,7 @@ def fit_manager_font(wid, maxfs=16, minfs=9):
     b = subprocess.run(["osascript", "-e", f'tell application "Terminal" to get bounds of window id {wid}'], capture_output=True, text=True).stdout.strip()
     fs, rows = get()
     if not fs: return
+    maxfs = maxfs or cfg("manager_font_max"); minfs = minfs or cfg("manager_font_min")
     for size in range(maxfs, minfs - 1, -1):
         if size != fs:
             subprocess.run(["osascript", "-e", f'tell application "Terminal"\n set font size of selected tab of window id {wid} to {size}\n set bounds of window id {wid} to {{{b}}}\nend tell'], capture_output=True)
@@ -497,7 +535,7 @@ def tile(quiet=False):
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
     if zoomed:   # ~80% of the terminal area (right of the manager/dock column), centered
         x, y, w, h = term_area
-        zw, zh = round(w * 0.8), round(h * 0.8)
+        zw, zh = round(w * cfg("zoom_scale")), round(h * cfg("zoom_scale"))
         l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
         moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
@@ -962,9 +1000,8 @@ class Outline:
                 os.makedirs(os.path.dirname(binp), exist_ok=True)
                 if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
             # 6px ring in the selection colour (SEL_RGB).
-            rgb = os.environ.get("HERD_OUTLINE_RGB", SEL_RGB).split()
-            radius = os.environ.get("HERD_OUTLINE_RADIUS", "16" if int(os.uname().release.split(".")[0]) >= 25 else "10")
-            self.p = subprocess.Popen([binp, os.environ.get("HERD_OUTLINE_PX", "6"), radius, *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            rgb = cfg("outline_rgb").split()
+            self.p = subprocess.Popen([binp, str(cfg("outline_px")), str(cfg("outline_radius")), *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, text=True)
         except (OSError, subprocess.SubprocessError): self.p = None
     def alive(self):
@@ -1221,7 +1258,7 @@ def manager():
             curses.endwin()
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
-        outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") else None
+        outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") and cfg("outline") else None
         scrim = Scrim() if not os.environ.get("HERD_TEST_SANDBOX") else None
         dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
         sel_seen = [None]
@@ -1255,7 +1292,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.9")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.0")
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],

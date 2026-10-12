@@ -89,18 +89,30 @@ largest font (Monaco, up to 16) that fits all of them plus the divider and broad
 - Resizing needs Accessibility for Terminal (System Settings > Privacy & Security > Accessibility).
 - State is kept in `~/.config/herd/dock.json` and the area in `~/.config/herd/dock-area.json` (written by `herd tile`).
 
-Config file `~/.config/herd/config.json` (JSON):
+### Configuration
 
-```json
-{"dock": true, "dock_min_width": 920}
-```
+`~/.config/herd/config.json` is plain JSON. It lists every key. Since JSON has no comments, the `_doc`
+object holds a one-line description of each key and is ignored when reading. Missing keys use the
+defaults; env vars, where listed, override the file. Changes apply on the next retile or manager start.
 
-- `dock`: `false` turns the dock off. The manager gets its full column height and tiling works as before.
-- `zoom_dim`: opacity (0-1, default 0.85) of the dark scrim over the other terminals while one is zoomed
-  (0 disables it; env override `HERD_ZOOM_DIM`). The scrim sits just below the zoomed window, covers only
-  the terminal area (not the manager or the dock), and is click-through.
-- `dock_min_width`: the minimum width of the left panel (manager and dock) in px. The default is 920, wide
-  enough for Grok Bot's window so bot names show.
+| Key | Default | Env override | Meaning |
+|---|---|---|---|
+| `dock` | `true` | | Dock area under the manager (`false` = classic layout) |
+| `dock_min_width` | `920` | | Minimum width (px) of the dock-mode left panel (manager + dock) |
+| `dock_panel_fraction` | `0.3` | | Dock-mode left panel width as a fraction of the tiled width |
+| `zoom_dim` | `0.85` | `HERD_ZOOM_DIM` | Opacity of the dark scrim under a zoomed window (0 = off) |
+| `zoom_scale` | `0.8` | | Zoomed window size as a fraction of the terminal area |
+| `gap` | `8` | | Gap (px) between tiled windows |
+| `manager_width` | `520` | | Manager column width in dock-off mode |
+| `manager_font_max` / `manager_font_min` | `16` / `9` | | Font range the dock-mode manager fits all sessions into |
+| `selection_color_256` | `25` | | Selected-row background (xterm-256 index; 25 = #005faf) |
+| `outline` | `true` | `HERD_NO_OUTLINE=1` disables | Outline around the selected session's window |
+| `outline_rgb` | `"0 95 175"` | `HERD_OUTLINE_RGB` | Outline colour |
+| `outline_px` | `6` | `HERD_OUTLINE_PX` | Outline thickness |
+| `outline_radius` | `16` (10 before macOS 26) | `HERD_OUTLINE_RADIUS` | Outline corner radius |
+
+The `HERD_TEST_*` variables are headless test hooks. `HERD_MGR_SEL` and `HERD_MGR_HELP` are internal
+state carried across manager reloads. None of them are settings.
 
 ### Manager keys
 
