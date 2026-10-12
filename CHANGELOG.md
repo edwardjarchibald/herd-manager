@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.16 - 2026-10-12
+
+### Changed
+- Zoom scrim hugs the terminals. Instead of one square rect over the whole terminal area (which covered the gap next to the manager/dock panel), herd-scrim now draws the union of rounded rects, one per tiled non-zoomed terminal, from herd's computed `frames` in layout.json. The panel gap and the gaps between tiles stay clear, so each terminal reads as dimmed. The zoomed window still sits above the scrim.
+- New config key `scrim_radius` (env `HERD_SCRIM_RADIUS`), default matches the Terminal window corners: 16 on macOS 26 (Tahoe), 10 before.
+- The scrim's per-second `osascript` bounds lookup of the zoomed window is gone. The zoomed window is matched by its computed zoom rect. The helper gets a new line (and redraws) only when the layout changes; between those it only re-orders itself below the zoomed window.
+- Helper protocol: `<alpha> <radius> <zoom l t r b> [<tile l t r b>]...` or `hide`.
+
 ## 0.6.15 - 2026-10-12
 
 ### Changed
