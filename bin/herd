@@ -382,6 +382,7 @@ def layout(x, y, w, h, n, manager=False, gap=GAP):
 CFGFILE = os.path.expanduser("~/.config/herd/config.json")
 DOCK_AREA = os.path.expanduser("~/.config/herd/dock-area.json")
 DOCK_STATE = os.path.expanduser("~/.config/herd/dock.json")
+LAYOUT = os.path.expanduser("~/.config/herd/layout.json")       # {"term_area": [l, t, r, b]} (zoom scrim)
 
 DOCK_MIN_W = 920   # default minimum dock/left-panel width (Grok Bot's window measured 916 px)
 
@@ -391,7 +392,9 @@ def config():
     except Exception: c = {}
     try: mw = int(c.get("dock_min_width", DOCK_MIN_W))
     except (TypeError, ValueError): mw = DOCK_MIN_W
-    return {"dock": c.get("dock", True) is not False, "dock_min_width": mw}
+    try: zd = float(os.environ.get("HERD_ZOOM_DIM") or c.get("zoom_dim", 0.85))
+    except (TypeError, ValueError): zd = 0.85
+    return {"dock": c.get("dock", True) is not False, "dock_min_width": mw, "zoom_dim": max(0.0, min(1.0, zd))}
 
 def docked():
     """{"pid","bundle","wid"} of the window docked by herd-dock, or None."""
@@ -486,6 +489,10 @@ def tile(quiet=False):
         if has_mgr: mrect = m2
         tmp = DOCK_AREA + ".tmp"; json.dump({"area": list(dock_rect)}, open(tmp, "w")); os.replace(tmp, DOCK_AREA)
     elif os.path.exists(DOCK_AREA): os.remove(DOCK_AREA)
+    tx, ty, tw, th = term_area
+    try:
+        tmp = LAYOUT + ".tmp"; json.dump({"term_area": [tx, ty, tx + tw, ty + th]}, open(tmp, "w")); os.replace(tmp, LAYOUT)
+    except OSError: pass
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
     if zoomed:   # ~80% of the terminal area (right of the manager/dock column), centered
@@ -908,6 +915,39 @@ def start_dock():
         return subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError): return None
 
+class Scrim:
+    """Zoom scrim (helper/herd-scrim.swift): dark overlay over the terminal area, ordered directly below
+    the zoomed window (so above the other herd terminals). Hidden when nothing is zoomed."""
+    def __init__(self):
+        self.p = None; self.last = None; self.t = 0.0
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-scrim.swift")
+        binp = os.path.expanduser("~/.cache/herd/herd-scrim")
+        try:
+            if not os.path.exists(src): return
+            if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
+                os.makedirs(os.path.dirname(binp), exist_ok=True)
+                if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
+            self.p = subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        except (OSError, subprocess.SubprocessError): self.p = None
+    def _send(self, line):
+        if self.p and self.p.poll() is not None: self.__init__()
+        if not self.p or line == self.last: return
+        try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
+        except (OSError, ValueError): self.p = None
+    def update(self, suppress=False, force=False):
+        if not force and time.time() - self.t < 1.0: return
+        self.t = time.time()
+        z = None if suppress else next((r for k, r in _locked(lambda d: dict(d)).items() if k != MGR and r.get("zoom")), None)
+        dim = config()["zoom_dim"]
+        try: area = json.load(open(LAYOUT))["term_area"]
+        except Exception: area = None
+        if not z or not area or dim <= 0: self._send("hide"); return
+        q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(z["wid"])}'],
+                           capture_output=True, text=True)
+        b = [x.strip() for x in q.stdout.split(",")]
+        if q.returncode or len(b) != 4: self._send("hide"); return
+        self._send(" ".join(str(round(v)) for v in area) + f" {dim:.2f} " + " ".join(b))
+
 class Outline:
     """Green border around the selected session's herd window, drawn by a tiny Swift helper
     (helper/herd-outline.swift, compiled on first use into ~/.cache/herd). Click-through and
@@ -1182,6 +1222,7 @@ def manager():
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
         outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") else None
+        scrim = Scrim() if not os.environ.get("HERD_TEST_SANDBOX") else None
         dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
         sel_seen = [None]
         CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
@@ -1214,7 +1255,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.8")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.9")
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
@@ -1267,6 +1308,7 @@ def manager():
                 if rs_ and subprocess.run(["osascript", "-e", f'tell application "Terminal" to get visible of window id {int(rs_[0]["wid"])}'],
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
+            if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None)
             if outline and (gf["behind"] or hidden[0]): outline._send("hide")
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
@@ -1422,7 +1464,7 @@ def manager():
                     sel_seen[0] = None                                 # outline re-follows (or hides while behind)
                 elif ch == "Z" and cur:
                     if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
-                    msg = mgr_zoom(cur, outline); last = 0
+                    msg = mgr_zoom(cur, outline); last = 0; sel_seen[0] = None
             except SystemExit as e: msg = f"! {e}"
             except Exception as e: msg = f"! {e}"
     os.environ.setdefault("ESCDELAY", "25")

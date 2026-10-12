@@ -96,6 +96,9 @@ Config file `~/.config/herd/config.json` (JSON):
 ```
 
 - `dock`: `false` turns the dock off. The manager gets its full column height and tiling works as before.
+- `zoom_dim`: opacity (0-1, default 0.85) of the dark scrim over the other terminals while one is zoomed
+  (0 disables it; env override `HERD_ZOOM_DIM`). The scrim sits just below the zoomed window, covers only
+  the terminal area (not the manager or the dock), and is click-through.
 - `dock_min_width`: the minimum width of the left panel (manager and dock) in px. The default is 920, wide
   enough for Grok Bot's window so bot names show.
 

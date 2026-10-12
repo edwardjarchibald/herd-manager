@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.9 - 2026-10-12
+
+### Added
+- Zoom scrim: while a session is zoomed, a dark overlay covers the terminal area. It is ordered directly below the zoomed Terminal window, so it sits above the other herd terminals and under the zoomed window and its outline. It is click-through, never takes focus, and doesn't cover the manager or the dock.
+  - New helper `helper/herd-scrim.swift`, compiled into `~/.cache/herd/herd-scrim`.
+  - Opacity: `zoom_dim` in `~/.config/herd/config.json` (default 0.85, 0 disables), overridden by `HERD_ZOOM_DIM`.
+  - It is removed on unzoom, H hide, F behind and quit.
+  - `herd tile` writes the terminal area to `~/.config/herd/layout.json`.
+
 ## 0.5.8 - 2026-10-12
 
 ### Fixed
