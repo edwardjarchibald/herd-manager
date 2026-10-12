@@ -41,6 +41,8 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
+    "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
+    "min_cell_width":      (360,   None, "dock mode: narrowest terminal cell (px) before the grid adds a row instead of a column"),
     "gap":                 (8,     None, "gap (px) between tiled windows and around the edges"),
     "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
     "manager_font_max":    (16,    None, "dock mode: largest manager font size tried (shrinks until all sessions fit)"),
@@ -60,6 +62,7 @@ def cfg(key):
         try: v = json.load(open(CFGFILE)).get(key, default)
         except Exception: v = default
     try:
+        if v is None: return default
         if isinstance(default, bool): return v if isinstance(v, bool) else str(v).lower() not in ("0", "false", "no", "off", "")
         if isinstance(default, int): return int(float(v))
         if isinstance(default, float): return float(v)
@@ -296,8 +299,17 @@ def auto_names(apply=True, ws=None, ps=None):
         for w, new_ in changes: _relabel(w, new_)
     return [(w["label"], n) for w, n in changes]
 
+def max_terminals():
+    """Capacity: max_terminals from config, else the session rows the manager shows at manager_font_min
+    (rows - divider - broadcast line)."""
+    m = cfg("max_terminals")
+    if m and m > 0: return m
+    try: return max(1, int(json.load(open(LAYOUT))["manager_rows_at_min_font"]) - 2)
+    except Exception: return 20
+
 def new(name=None, cwd=None):
     labels = {w["label"] for w in workspaces()}
+    if len(labels) >= max_terminals(): sys.exit(f"max {max_terminals()} sessions reached (manager can't show more); kill one or set max_terminals")
     manual = name is not None
     if name is None:
         name = lowest_dev(labels)
@@ -441,7 +453,7 @@ def docked():
     return d if d.get("pid") else None
 
 def span_grid(x, y, w, h, n, gap=GAP):
-    """Dock-mode terminal tiling. Rows as cell counts: 1 = [1]; 2 = [2]; 3 = [2, 1]; 4 = [2, 2];
+    """Dock-mode terminal tiling. 7+: see the rows/cols loop (3 rows, more columns, then more rows). Rows as cell counts: 1 = [1]; 2 = [2]; 3 = [2, 1]; 4 = [2, 2];
     5 = [2, 2, 1]; 6 = 3 rows x 2 cols. 7+: 3 rows, ceil(n/3) columns, filled column by column; the
     last, partly filled column's cells share its full height (e.g. 7 -> one full-height cell)."""
     import math
@@ -457,10 +469,14 @@ def span_grid(x, y, w, h, n, gap=GAP):
                 l = x + c * (cw + gap)
                 out.append((round(l), round(t), round(l + cw), round(t + rh)))
         return out
-    cols = max(2, math.ceil(n / 3))
+    rows = 3                                     # 3 rows; add columns until cells get narrower than
+    while True:                                  # min_cell_width, then add a row instead
+        cols = max(2, math.ceil(n / rows))
+        if (w - gap * (cols - 1)) / cols >= cfg("min_cell_width") or rows >= n: break
+        rows += 1
     cw = (w - gap * (cols - 1)) / cols
     for c in range(cols):
-        k = min(3, n - 3 * c)
+        k = min(rows, n - rows * c)
         if k <= 0: break
         rh = (h - gap * (k - 1)) / k; l = x + c * (cw + gap)
         for r in range(k):
@@ -493,6 +509,11 @@ def fit_manager_font(wid, maxfs=None, minfs=None):
     fs, rows = get()
     if not fs: return
     maxfs = maxfs or cfg("manager_font_max"); minfs = minfs or cfg("manager_font_min")
+    if fs and rows:                          # remember how many rows the manager has at the min font (capacity)
+        try:
+            lay = json.load(open(LAYOUT)) if os.path.exists(LAYOUT) else {}
+            lay["manager_rows_at_min_font"] = int(rows * fs / minfs); json.dump(lay, open(LAYOUT, "w"))
+        except (OSError, ValueError): pass
     for size in range(maxfs, minfs - 1, -1):
         if size != fs:
             subprocess.run(["osascript", "-e", f'tell application "Terminal"\n set font size of selected tab of window id {wid} to {size}\n set bounds of window id {wid} to {{{b}}}\nend tell'], capture_output=True)
@@ -530,7 +551,10 @@ def tile(quiet=False):
     elif os.path.exists(DOCK_AREA): os.remove(DOCK_AREA)
     tx, ty, tw, th = term_area
     try:
-        tmp = LAYOUT + ".tmp"; json.dump({"term_area": [tx, ty, tx + tw, ty + th]}, open(tmp, "w")); os.replace(tmp, LAYOUT)
+        try: lay = json.load(open(LAYOUT))
+        except Exception: lay = {}
+        lay["term_area"] = [tx, ty, tx + tw, ty + th]
+        tmp = LAYOUT + ".tmp"; json.dump(lay, open(tmp, "w")); os.replace(tmp, LAYOUT)
     except OSError: pass
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
@@ -954,6 +978,13 @@ def start_dock():
         return subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError): return None
 
+OUTLINE_LOG = os.path.expanduser("~/.cache/herd/outline.log")
+def _olog(line):
+    try:
+        if os.path.exists(OUTLINE_LOG) and os.path.getsize(OUTLINE_LOG) > 500_000: os.replace(OUTLINE_LOG, OUTLINE_LOG + ".1")
+        with open(OUTLINE_LOG, "a") as f: f.write(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} mgr[{os.getpid()}] {line}\n")
+    except OSError: pass
+
 class Scrim:
     """Zoom scrim (helper/herd-scrim.swift): dark overlay over the terminal area, ordered directly below
     the zoomed window (so above the other herd terminals). Hidden when nothing is zoomed."""
@@ -1012,6 +1043,7 @@ class Outline:
         return bool(self.p)
     def _send(self, line):
         if not self.alive() or line == self.last: return
+        _olog(f"send {line}")
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def follow(self, name, force=False):
@@ -1026,7 +1058,13 @@ class Outline:
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
-        self._send(" ".join(b) if q.returncode == 0 and len(b) == 4 else "hide")
+        if q.returncode != 0 or len(b) != 4:
+            self.fails = getattr(self, "fails", 0) + 1
+            _olog(f"bounds lookup failed x{self.fails} for {name} wid={r['wid']}: rc={q.returncode} out={q.stdout.strip()!r} err={q.stderr.strip()[:120]!r}")
+            if self.fails >= 3: self._send("hide")                   # transient AppleScript failures keep the last rect
+            return
+        self.fails = 0
+        self._send(" ".join(b))
     def stop(self):
         if self.p:
             try: self.p.stdin.close()
@@ -1304,7 +1342,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.2")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.3")
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state

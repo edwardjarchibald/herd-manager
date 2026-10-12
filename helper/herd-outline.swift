@@ -41,6 +41,7 @@ panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
 panel.contentView = BorderView()
 
 var target: CGRect? = nil   // top-left coords
+var misses = 0, lastWID: CGWindowID? = nil
 
 /// CGWindowID of the on-screen Terminal window (layer 0) with these bounds, or nil.
 /// Uses owner PID/name and bounds only (no screen-recording permission needed).
@@ -58,12 +59,32 @@ func terminalWindowID(_ r: CGRect) -> CGWindowID? {
     return nil
 }
 
+let logPath = (NSHomeDirectory() as NSString).appendingPathComponent(".cache/herd/outline.log")
+var lastState = ""
+func hlog(_ s: String) {
+    if s == lastState { return }
+    lastState = s
+    let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"
+    let line = "\(f.string(from: Date())) helper[\(ProcessInfo.processInfo.processIdentifier)] \(s)\n"
+    if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
+    else { FileManager.default.createFile(atPath: logPath, contents: line.data(using: .utf8)) }
+}
 func refresh() {
-    guard let r = target, let wid = terminalWindowID(r), let main = NSScreen.screens.first else { panel.orderOut(nil); return }
+    guard let r = target else { hlog("hidden (no target)"); panel.orderOut(nil); return }
+    guard let main = NSScreen.screens.first else { return }
+    // CGWindowList can transiently miss the window (Terminal re-registering it while it redraws/retitles
+    // on output, reorders, retiles). Keep the outline where it is for up to 3 consecutive misses (~1.5 s)
+    // instead of hiding it at once -- hiding + reshowing on a single miss is the flicker.
+    let found = terminalWindowID(r)
+    if found == nil {
+        misses += 1
+        if misses >= 3 || lastWID == nil { hlog("lookup MISS x\(misses) for \(r): hidden"); panel.orderOut(nil); return }
+        hlog("lookup MISS x\(misses) for \(r): kept")
+    } else { misses = 0; lastWID = found; hlog("shown above wid \(found!) at \(r)") }
+    let wid = found ?? lastWID!
     let pad: CGFloat = border
     let frame = NSRect(x: r.minX - pad, y: main.frame.height - r.maxY - pad, width: r.width + 2 * pad, height: r.height + 2 * pad)
-    panel.setFrame(frame, display: true)
-    panel.contentView?.needsDisplay = true
+    if panel.frame != frame { panel.setFrame(frame, display: true); panel.contentView?.needsDisplay = true }   // no redraw churn
     panel.order(.above, relativeTo: Int(wid))   // directly above the target: apps in front still cover it
 }
 
@@ -71,6 +92,7 @@ DispatchQueue.global().async {
     while let line = readLine() {
         let parts = line.split(separator: " ").compactMap { Double($0) }
         DispatchQueue.main.async {
+            misses = 0; lastWID = nil
             if parts.count == 4 { target = CGRect(x: parts[0], y: parts[1], width: parts[2] - parts[0], height: parts[3] - parts[1]) }
             else { target = nil }
             refresh()

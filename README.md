@@ -74,7 +74,7 @@ row of a 3-row grid) and the dock below it. Terminals tile adaptively in the are
 |         |  t2  |  t5  |  t8  |        4 = 2x2     5 = 2 + 2 + 1   6 = 3 rows x 2
 |  dock   +------+------+------+        7+ = 3 rows, a new column per 3 terminals, filled top to
 |         |  t3  |  t6  |  t9  |        bottom; a partly filled last column's cells share its height
-+---------+------+------+------+        (9 shown; 10+ = 4 columns, ...)
++---------+------+------+------+        (9 shown; more: columns while cells stay >= min_cell_width, then rows)
 ```
 
 Z zooms to 80% of the terminal area, centered. The manager lists one line per session and picks the
@@ -103,6 +103,8 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `zoom_dim` | `0.85` | `HERD_ZOOM_DIM` | Opacity of the dark scrim under a zoomed window (0 = off) |
 | `zoom_on_select` | `true` | | Zoom the selected session's window automatically (250 ms debounce); Z unzooms until the selection changes |
 | `zoom_scale` | `0.8` | | Zoomed window size as a fraction of the terminal area |
+| `max_terminals` | `0` | | Max sessions; 0 = automatic (rows the manager shows at `manager_font_min`) |
+| `min_cell_width` | `360` | | Dock mode: narrowest cell before the grid adds a row instead of a column |
 | `gap` | `8` | | Gap (px) between tiled windows |
 | `manager_width` | `520` | | Manager column width in dock-off mode |
 | `manager_font_max` / `manager_font_min` | `16` / `9` | | Font range the dock-mode manager fits all sessions into |

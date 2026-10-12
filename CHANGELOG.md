@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.3 - 2026-10-12
+
+### Changed
+- No fixed terminal cap. Capacity = the session rows the manager shows at `manager_font_min` (rows minus divider and broadcast line), measured on retile and stored in `~/.config/herd/layout.json`; 30 on a 2560x1440 display. `max_terminals` in config.json overrides it (0/null = automatic). N (and `herd new`) refuses beyond it with a status message.
+- Dock-mode tiling for 7+ terminals: 3 rows, adding columns while cells stay at least `min_cell_width` (default 360 px) wide; after that, rows are added instead. The cells of a partly filled last column share its height.
+
+### Fixed
+- Outline flicker. herd-outline found the target window in CGWindowList by its bounds, and on a single miss it hid the outline and showed it again on the next refresh. Misses happen transiently, e.g. while Terminal retiles or re-registers a window. The helper now keeps the outline on the last good window for up to 3 consecutive misses (about 1.5 s) and only re-sets its frame when it changes. On the manager side, a failed AppleScript bounds lookup no longer sends "hide" unless it fails 3 times in a row.
+- Every outline command (manager) and helper lookup state change is logged with millisecond timestamps to `~/.cache/herd/outline.log`.
+
 ## 0.6.2 - 2026-10-12
 
 ### Changed
