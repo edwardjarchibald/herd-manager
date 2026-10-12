@@ -1064,9 +1064,13 @@ class Outline:
                 if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
             # 6px ring in the selection colour (SEL_RGB).
             rgb = (self.rgb or cfg("outline_rgb")).split()
-            self.p = subprocess.Popen([binp, str(cfg("outline_px")), str(cfg("outline_radius")), *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            # --static: drawn exactly where herd says, above the given wid; no bounds lookup that could make the
+            # helper hide itself behind the manager's back (0.6.11 fix for the vanishing zoomed outline).
+            self.p = subprocess.Popen([binp, "--static", str(cfg("outline_px")), str(cfg("outline_radius")), *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, text=True)
         except (OSError, subprocess.SubprocessError): self.p = None
+    def showing(self): return bool(self.p) and self.last not in (None, "hide")
+    def resync(self): self.last = None; self.t = 0.0          # forget dedupe state: next send goes out for sure
     def alive(self):
         """Restart the helper if it died (crash, killed)."""
         if self.p and self.p.poll() is not None:
@@ -1089,7 +1093,7 @@ class Outline:
         if force: raise_behind_manager(r["wid"])
         fr = layout_frames().get(name)
         if fr:                                                       # herd placed it: no window lookup
-            self.fails = 0; self._send(" ".join(str(round(v)) for v in fr)); return
+            self.fails = 0; self._send(f"{int(r['wid'])} " + " ".join(str(round(v)) for v in fr)); return
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
@@ -1099,7 +1103,7 @@ class Outline:
             if self.fails >= 3: self._send("hide")                   # transient AppleScript failures keep the last rect
             return
         self.fails = 0
-        self._send(" ".join(b))
+        self._send(f"{int(r['wid'])} " + " ".join(b))
     def stop(self):
         if self.p:
             try: self.p.stdin.close()
@@ -1117,6 +1121,20 @@ def attention_outline_targets(att_on, highlight, sel_name, recs, suppress):
     t = {n for n in att_on if (n != sel_name or n == zoomed) and n != MGR and recs.get(n, {}).get("wid")}
     if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
     return t
+
+def desired_outlines(att_on, highlight, sel_name, recs, suppress):
+    """The one place deciding both outlines, from current in-memory state. Returns (blue_name, yellow_set).
+    Blue goes on the zoomed window if one is zoomed (even when it is not the selected session), else on the
+    selected session. A latched zoomed window gets yellow instead of blue, so a zoomed window always has
+    exactly one outline. Yellow never duplicates the blue target. Both empty while H/F hid the windows."""
+    if suppress: return None, set()
+    zoomed = next((k for k, r in recs.items() if k != MGR and r.get("zoom") and r.get("wid")), None)
+    blue = zoomed or sel_name
+    if blue and highlight and blue in att_on and blue == zoomed: blue = None
+    if not highlight: return blue, set()
+    t = {n for n in att_on if n != blue and n != MGR and recs.get(n, {}).get("wid")}
+    if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
+    return blue, t
 
 def selected_outline_yellow(att_on, highlight, sel_name, recs):
     """True when the selected session is the zoomed window and latched in attention: its blue outline is
@@ -1438,7 +1456,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.10")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.11")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1547,17 +1565,27 @@ def manager():
                         except Exception as e: msg = f"! {e}"
                     zoom_pending = False; zs["scrim"] = True
             if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None or zs.pop("scrim", False))
-            if outline and (gf["behind"] or hidden[0]): outline._send("hide")
-            elif outline and zoom_pending: outline._send("hide")     # no outline at the tiled spot; zoom_to() shows it zoomed
-            elif outline and rows and selected_outline_yellow(att_on, cfg("attention_highlight"), rows[sel]["name"], _locked(lambda d: dict(d))):
-                outline._send("hide"); sel_seen[0] = None              # latched zoomed window: yellow instead of blue
+            recs_ = _locked(lambda d: dict(d))
+            suppress_ = gf["behind"] or hidden[0]
+            blue_, yellow_ = desired_outlines(att_on, cfg("attention_highlight"), rows[sel]["name"] if rows else None, recs_, suppress_)
+            if outline and (suppress_ or not blue_): outline._send("hide"); sel_seen[0] = None
+            elif outline and zoom_pending and blue_ == (rows[sel]["name"] if rows else None):
+                outline._send("hide")                                  # no outline at the tiled spot; zoom_to() shows it zoomed
             elif outline:
-                cur_name = rows[sel]["name"] if rows else None
-                outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
-            if att_outlines:
-                recs_ = _locked(lambda d: dict(d))
-                att_outlines.update(attention_outline_targets(att_on, cfg("attention_highlight"), rows[sel]["name"] if rows else None,
-                                                              recs_, gf["behind"] or hidden[0]), recs_)
+                outline.follow(blue_, force=blue_ != sel_seen[0]); sel_seen[0] = blue_
+            if att_outlines: att_outlines.update(yellow_, recs_)
+            # self-check (in-memory only, no lookups): a zoomed window outside H/F must have exactly one outline.
+            z_ = next((k for k, r in recs_.items() if k != MGR and r.get("zoom") and r.get("wid")), None)
+            if z_ and not suppress_ and not zoom_pending and outline and att_outlines and outline.p and att_outlines.p:
+                zw_ = str(int(recs_[z_]["wid"]))
+                n_ = int(outline.showing() and blue_ == z_) + int(any(e.split(" ")[0] == zw_ for e in (att_outlines.last or "hide").split("|")))
+                if n_ != 1 and time.time() - getattr(outline, "chk_t", 0) >= 2.0:
+                    outline.chk_t = time.time()
+                    _olog(f"self-check: zoomed {z_} has {n_} outlines (blue={blue_} last={outline.last!r} att={att_outlines.last!r}); resyncing")
+                    outline.resync(); att_outlines.last = None
+                    if blue_: outline.follow(blue_, force=True)
+                    else: outline._send("hide")
+                    att_outlines.update(yellow_, recs_)
             scr.erase(); H, W = scr.getmaxyx()
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel

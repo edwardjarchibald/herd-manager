@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.11 - 2026-10-12
+
+### Fixed
+- A zoomed window could lose its outline entirely. Root cause (outline.log, 18:32:54-18:33:13): the blue helper ran in tracking mode and hid itself after 3 CGWindowList bounds misses (the live window bounds no longer matched herd's computed zoom rect within 4-6 px). The manager never learned about it, and its de-duplication (same line as last time) never re-sent the frame, so the window stayed without an outline until the next state change (here the next latch, which sent yellow). Yellow/blue hand-off on a window click itself worked (18:34:21, 18:42:30, 18:50:14).
+
+### Changed
+- The blue outline helper now also runs in `--static` mode: it is drawn at herd's computed frame above the session's window id and does no lookups, so it can no longer hide itself. (It no longer self-hides on another Space or when minimized.)
+- One function, `desired_outlines()`, computes both outlines from current state on every pass. Blue goes on the zoomed window when one is zoomed, even when it is not the selected session; otherwise it goes on the selected session. A latched zoomed window gets yellow instead of blue, and yellow never duplicates the blue target.
+- Self-check every pass, using in-memory state only: if a window is zoomed and herd is not behind/hidden, exactly one helper must be showing it. Otherwise both helpers are resynced (logged as `self-check` in outline.log, at most every 2 s).
+
 ## 0.6.10 - 2026-10-12
 
 ### Changed
