@@ -1529,21 +1529,15 @@ def manager():
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
             zoom_pending = False
-            # attention latch: set on a NEW done/blocked event (status+seq not yet acknowledged); stays set through
-            # transient status flips; cleared only by an explicit event: selecting the session (arrow/scroll onto it,
-            # or clicking its row, also when already selected) or clicking its window to the front. Being selected
-            # (or zoomed) does NOT clear or pre-acknowledge attention that starts later.
-            for r_ in rows:                                             # agent went back to working: the user answered
-                if r_["name"] in att_on and r_.get("agent") == "working":
-                    _herd_log(f"attention CLEAR {r_['name']} (agent working)"); att_on.pop(r_["name"])
-            for r_ in rows:
-                k_ = r_.get("att")
-                if k_ and k_ != att_ack.get(r_["name"]) and r_["name"] not in att_on:
-                    att_on[r_["name"]] = k_; _herd_log(f"attention SET {r_['name']} ({k_})")
+            # attention = herdr's CURRENT state (0.6.12): yellow exactly while herdr reports the agent done/blocked,
+            # gone as soon as it is working again. No latch, no click/select acknowledgement.
+            cur_ = {r_["name"]: r_["att"] for r_ in rows if r_.get("att")}
+            for n_ in [n_ for n_ in att_on if n_ not in cur_]: _herd_log(f"attention CLEAR {n_} (herdr: {next((r_.get('agent') for r_ in rows if r_['name'] == n_), 'gone')})"); att_on.pop(n_)
+            for n_, k_ in cur_.items():
+                if att_on.get(n_) != k_: _herd_log(f"attention SET {n_} ({k_})"); att_on[n_] = k_
             if rows:
                 nm_ = rows[sel]["name"]
                 if nm_ != sel_ev[1] or sel_ev[0] == nm_:                # selection event (moved onto it / row clicked)
-                    if nm_ in att_on: _herd_log(f"attention CLEAR {nm_} (selected)"); att_on.pop(nm_)
                     if rows[sel].get("att"): att_ack[nm_] = rows[sel]["att"]
                 sel_ev[0] = None; sel_ev[1] = nm_
             fw_ = front_win[0]                                          # from the background focus watcher
@@ -1552,7 +1546,6 @@ def manager():
                 recs_ = _locked(lambda d: dict(d))
                 for r_ in rows:
                     if recs_.get(r_["name"], {}).get("wid") == fw_:
-                        if r_["name"] in att_on: _herd_log(f"attention CLEAR {r_['name']} (window focused)"); att_on.pop(r_["name"])
                         if r_.get("att"): att_ack[r_["name"]] = r_["att"]
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
