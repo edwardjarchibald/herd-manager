@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.9 - 2026-10-12
+
+### Changed
+- Outlines no longer track window positions. herd places every window itself, so `tile()` now records the frame it computed for each session (tile rect, or zoom rect when zoomed) in `~/.config/herd/layout.json` (`frames`), and the outlines are drawn at those frames.
+- Yellow attention outlines: one `herd-outline` helper in a new `--static` mode draws all of them (one click-through panel per rect, each ordered above its window). It does no polling. The manager sends a new line only when the target set or a computed frame changes (retile, zoom/unzoom, new/killed sessions, H/F, dock changes, latch set/clear). This removes the per-window helpers and their ~1/s `osascript` bounds lookups (~100 ms each) on the manager's UI thread. Panels are re-ordered above their windows on each update and when the frontmost app changes.
+- Blue selected outline: the manager sends the computed frame (tile or zoom rect) instead of reading the window's bounds with `osascript` once a second. It falls back to the live bounds only for a window without a computed frame (e.g. on another display). The blue helper keeps its own in-process visibility check (hides on another Space/minimized), unchanged.
+- On the first manager start after the upgrade, if `layout.json` has no `frames`, the manager runs one idempotent retile to record them.
+- Scrim, colours and window handling are unchanged. Only herd-recorded windows are touched.
+
 ## 0.6.8 - 2026-10-12
 
 ### Added

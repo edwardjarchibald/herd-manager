@@ -528,6 +528,25 @@ def fit_manager_font(wid, maxfs=None, minfs=None):
             fs, rows = get()
         if rows >= need: break
 
+def _zoom_rect(term_area):
+    """~80% of the terminal area (right of the manager/dock column), centered."""
+    x, y, w, h = term_area
+    zw, zh = round(w * cfg("zoom_scale")), round(h * cfg("zoom_scale"))
+    l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
+    return (l, t, l + zw, t + zh)
+
+_frames_cache = [None, {}]
+def layout_frames():
+    """{record key: [l, t, r, b]} as last computed by tile() (any herd process), from layout.json.
+    Re-read only when the file's mtime changes (a stat, no window lookup)."""
+    try: mt = os.stat(LAYOUT).st_mtime_ns
+    except OSError: return {}
+    if mt != _frames_cache[0]:
+        try: _frames_cache[1] = json.load(open(LAYOUT)).get("frames") or {}
+        except (OSError, ValueError): _frames_cache[1] = {}
+        _frames_cache[0] = mt
+    return _frames_cache[1]
+
 def tile(quiet=False):
     recs = _locked(lambda d: dict(d))
     if not recs: return
@@ -562,15 +581,14 @@ def tile(quiet=False):
         try: lay = json.load(open(LAYOUT))
         except Exception: lay = {}
         lay["term_area"] = [tx, ty, tx + tw, ty + th]
+        fr = {n: list(r) for n, r in zip(same, rects)}
+        if zoomed: fr[zoomed] = list(_zoom_rect(term_area))
+        lay["frames"] = fr                   # herd-computed frame per session (tile rect or zoom rect) for the outlines
         tmp = LAYOUT + ".tmp"; json.dump(lay, open(tmp, "w")); os.replace(tmp, LAYOUT)
     except OSError: pass
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
-    if zoomed:   # ~80% of the terminal area (right of the manager/dock column), centered
-        x, y, w, h = term_area
-        zw, zh = round(w * cfg("zoom_scale")), round(h * cfg("zoom_scale"))
-        l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
-        moves[str(alive[zoomed]["wid"])] = (l, t, l + zw, t + zh)
+    if zoomed: moves[str(alive[zoomed]["wid"])] = _zoom_rect(term_area)
     changed = sum(1 for wid, r in moves.items() if [round(v) for v in q["windows"][wid]] != list(r))
     _jxa(JXA_SET, moves)
     if has_mgr and dock_rect: fit_manager_font(alive[MGR]["wid"])
@@ -1060,14 +1078,18 @@ class Outline:
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def follow(self, name, force=False):
-        """Point the border at session `name`'s window, at its LIVE frame (Terminal bounds, re-read ~1/s,
-        so manual moves are followed), or hide if it has no window."""
+        """Point the border at session `name`'s window, at the frame herd computed for it in tile() (tile
+        or zoom rect; no window lookup), or hide if it has no window. Only a window without a computed
+        frame (e.g. on another display) falls back to its live Terminal bounds (~1/s)."""
         if not self.alive(): return
         if not force and time.time() - self.t < 1.0: return
         self.t = time.time()
         r = _locked(lambda d: d.get(name)) if name else None
         if not r: self._send("hide"); return
         if force: raise_behind_manager(r["wid"])
+        fr = layout_frames().get(name)
+        if fr:                                                       # herd placed it: no window lookup
+            self.fails = 0; self._send(" ".join(str(round(v)) for v in fr)); return
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
@@ -1096,19 +1118,39 @@ def attention_outline_targets(att_on, highlight, sel_name, recs, suppress):
     return t
 
 class AttentionOutlines:
-    """One herd-outline helper (yellow) per session needing attention. Each follows its window's live
-    bounds ~1/s (Outline.follow, with its 3-miss tolerance on both sides); a helper is stopped (pipe
-    closed -> it exits) when its session leaves the target set. Never raises or moves any window."""
-    def __init__(self): self.o = {}
-    def update(self, targets):
-        for n in list(self.o):
-            if n not in targets: _olog(f"[att:{n}] stop"); self.o.pop(n).stop()
-        for n in targets:
-            if n not in self.o:
-                self.o[n] = Outline(rgb=cfg("attention_outline_rgb"), tag=f"att:{n}"); _olog(f"[att:{n}] start")
-            self.o[n].follow(n)
+    """Yellow outlines around every session needing attention, all drawn by ONE herd-outline helper in
+    --static mode at the frames herd computed itself (layout_frames(): tile rect or zoom rect). Nothing
+    is polled: a new line goes to the helper only when the target set or a computed frame changes
+    (retile, zoom/unzoom, new/killed sessions, H/F, dock changes, latch set/clear). Never raises or
+    moves any window."""
+    def __init__(self): self.p = None; self.last = None; self._start()
+    def _start(self):
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-outline.swift")
+        binp = os.path.expanduser("~/.cache/herd/herd-outline")
+        try:
+            if not os.path.exists(src): return
+            if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
+                os.makedirs(os.path.dirname(binp), exist_ok=True)
+                if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
+            self.p = subprocess.Popen([binp, "--static", str(cfg("outline_px")), str(cfg("outline_radius")), *cfg("attention_outline_rgb").split()],
+                                      stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+            self.last = None; _olog("[att] start static helper")
+        except (OSError, subprocess.SubprocessError): self.p = None
+    def update(self, targets, recs):
+        if self.p and self.p.poll() is not None: self._start()      # helper died: restart, resend
+        if not self.p: return
+        fr = layout_frames()
+        ents = [f"{int(recs[n]['wid'])} " + " ".join(str(round(v)) for v in fr[n]) for n in sorted(targets) if n in fr and recs.get(n, {}).get("wid")]
+        line = "|".join(ents) if ents else "hide"
+        if line == self.last: return
+        _olog(f"[att] send {line}")
+        try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
+        except (OSError, ValueError): self.p = None
     def stop(self):
-        for n in list(self.o): self.o.pop(n).stop()
+        if self.p:
+            try: self.p.stdin.close()
+            except OSError: pass
+            self.p = None
 
 def zoom(name):
     """Toggle zoom on session `name`'s window (at most one zoomed). Returns 'on'/'off', or None if no window."""
@@ -1349,6 +1391,13 @@ def manager():
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
         outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") and cfg("outline") else None
+        if not os.environ.get("HERD_TEST_SANDBOX"):
+            try: has_frames = "frames" in json.load(open(LAYOUT))
+            except Exception: has_frames = False
+            if not has_frames:                                 # first run after 0.6.9: one idempotent retile records the frames
+                try:
+                    with keep_front(): tile(quiet=True)
+                except (Exception, SystemExit): pass
         att_outlines = AttentionOutlines() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") and cfg("outline") else None
         scrim = Scrim() if not os.environ.get("HERD_TEST_SANDBOX") else None
         dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
@@ -1383,7 +1432,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.8")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.9")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
@@ -1493,8 +1542,9 @@ def manager():
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
             if att_outlines:
+                recs_ = _locked(lambda d: dict(d))
                 att_outlines.update(attention_outline_targets(att_on, cfg("attention_highlight"), rows[sel]["name"] if rows else None,
-                                                              _locked(lambda d: dict(d)), gf["behind"] or hidden[0]))
+                                                              recs_, gf["behind"] or hidden[0]), recs_)
             scr.erase(); H, W = scr.getmaxyx()
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel

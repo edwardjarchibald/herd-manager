@@ -2,6 +2,11 @@
 // Protocol on stdin, one command per line (Terminal-style top-left coordinates of the main screen):
 //   "<left> <top> <right> <bottom>"   show the border around that rectangle
 //   "hide"                            hide it
+// Static mode (herd-outline --static [border_px] [radius] [r g b]): draws any number of rings at the given
+// rects, no window tracking or polling. One line per update, replacing everything drawn:
+//   "<wid> <left> <top> <right> <bottom>|<wid> ...|..."   (wid = CGWindowID of the window to sit above)
+//   "hide"                                                 remove all rings
+// Panels are re-ordered above their windows only on a new line or when the frontmost app changes.
 // Exits when stdin closes (the herd manager quit). Needs no Accessibility permission.
 // It hides itself when no on-screen Terminal window matches the rectangle (other Space, minimized,
 // covered by fullscreen), checked via CGWindowList bounds (no window titles/screen content).
@@ -31,6 +36,46 @@ final class BorderView: NSView {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+
+if CommandLine.arguments.contains("--static") {
+    var panels: [NSPanel] = []
+    var wids: [Int] = []
+    func makePanel() -> NSPanel {
+        let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false; p.ignoresMouseEvents = true
+        p.level = .normal; p.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        p.contentView = BorderView()
+        return p
+    }
+    func reorder() { for (p, w) in zip(panels, wids) { p.order(.above, relativeTo: w) } }
+    func apply(_ line: String) {
+        guard let main = NSScreen.screens.first else { return }
+        var rects: [(Int, CGRect)] = []
+        if line != "hide" {
+            for ent in line.split(separator: "|") {
+                let v = ent.split(separator: " ").compactMap { Double($0) }
+                if v.count == 5 { rects.append((Int(v[0]), CGRect(x: v[1], y: v[2], width: v[3] - v[1], height: v[4] - v[2]))) }
+            }
+        }
+        while panels.count < rects.count { panels.append(makePanel()) }
+        for (i, p) in panels.enumerated() where i >= rects.count { p.orderOut(nil) }
+        wids = rects.map { $0.0 }
+        for (i, (_, r)) in rects.enumerated() {
+            let frame = NSRect(x: r.minX - border, y: main.frame.height - r.maxY - border, width: r.width + 2 * border, height: r.height + 2 * border)
+            if panels[i].frame != frame { panels[i].setFrame(frame, display: true); panels[i].contentView?.needsDisplay = true }
+        }
+        reorder()
+    }
+    DispatchQueue.global().async {
+        while let line = readLine() { DispatchQueue.main.async { apply(line.trimmingCharacters(in: .whitespaces)) } }
+        DispatchQueue.main.async { exit(0) }
+    }
+    NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
+        reorder(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder() }
+    }
+    app.run()
+    exit(0)
+}
 let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 panel.isOpaque = false
 panel.backgroundColor = .clear
