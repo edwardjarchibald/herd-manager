@@ -74,6 +74,8 @@ if CommandLine.arguments.contains("--static") {
         while panels.count < rects.count { panels.append(makePanel()) }
         for (i, p) in panels.enumerated() where i >= rects.count { p.orderOut(nil) }
         wids = rects.map { $0.0 }; tops = newTops
+        // frontmostApplication is stale in a freshly started process until the run loop has spun: re-check once.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { reorder() }
         for (i, (_, r)) in rects.enumerated() {
             let frame = NSRect(x: r.minX - border, y: main.frame.height - r.maxY - border, width: r.width + 2 * border, height: r.height + 2 * border)
             if panels[i].frame != frame { panels[i].setFrame(frame, display: true); panels[i].contentView?.needsDisplay = true }

@@ -10,7 +10,7 @@
 - The self-check now strips the new `+` prefix before comparing wids.
 
 ### Changed
-- The manager marks the zoomed window's entry with a `+` prefix on the wid (blue and yellow helpers). While Terminal is frontmost, the static helper keeps that ring at floating level, so a raise inside Terminal can't cover it. When another app is frontmost, it drops back to normal level directly above the window, so other apps' windows still cover it. Tile rings are unchanged. Nothing is polled.
+- The manager marks the zoomed window's entry with a `+` prefix on the wid (blue and yellow helpers). While Terminal is frontmost, the static helper keeps that ring at floating level, so a raise inside Terminal can't cover it. When another app is frontmost, it drops back to normal level directly above the window, so other apps' windows still cover it. Tile rings are unchanged. Nothing is polled. The level is checked again 0.3 s after each update, because `frontmostApplication` is stale in a freshly started helper. (Right after the 19:04:14 reload the ring was still at layer 0 with Terminal frontmost. It reached layer 3 after the next event.)
 
 ## 0.6.11 - 2026-10-12
 
