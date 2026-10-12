@@ -101,6 +101,7 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `dock_min_width` | `920` | | Minimum width (px) of the dock-mode left panel (manager + dock) |
 | `dock_panel_fraction` | `0.3` | | Dock-mode left panel width as a fraction of the tiled width |
 | `zoom_dim` | `0.85` | `HERD_ZOOM_DIM` | Opacity of the dark scrim under a zoomed window (0 = off) |
+| `zoom_on_select` | `true` | | Zoom the selected session's window automatically (250 ms debounce); Z unzooms until the selection changes |
 | `zoom_scale` | `0.8` | | Zoomed window size as a fraction of the terminal area |
 | `gap` | `8` | | Gap (px) between tiled windows |
 | `manager_width` | `520` | | Manager column width in dock-off mode |

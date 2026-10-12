@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 - 2026-10-12
+
+### Added
+- Zoom on select (`zoom_on_select`, default true): selecting a session with a window, by click or arrow keys after a 250 ms debounce, zooms its window and unzooms the previous one. Z toggles the zoom for the selected session, and an unzoom with Z holds until the selection changes. A session without a window changes nothing. Terminal is never activated, and the scrim and outline follow.
+
 ## 0.6.0 - 2026-10-12
 
 ### Added

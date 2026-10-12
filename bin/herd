@@ -39,6 +39,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
     "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
+    "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "gap":                 (8,     None, "gap (px) between tiled windows and around the edges"),
     "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
@@ -1072,6 +1073,17 @@ def dock_raise():
     subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, term], capture_output=True)
     _herd_log(f"dock_raise pid={d['pid']}")
 
+def zoom_to(name, outline=None):
+    """Auto-zoom on select: make `name` the (only) zoomed window, if it has one. Never changes the
+    frontmost app. Returns True if something changed."""
+    r = recorded(name)
+    if not r or r.get("zoom"): return False
+    with keep_front():
+        zoom(name)                      # unzooms any other, zooms this one, retiles
+        refocus_manager()
+        if outline: outline.follow(name, force=True)
+    return True
+
 def raise_behind_manager(wid):
     """Bring a herd window to the top of Terminal's own window stack while the manager stays the
     front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
@@ -1292,7 +1304,8 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.0")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.1")
+        zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
@@ -1345,6 +1358,15 @@ def manager():
                 if rs_ and subprocess.run(["osascript", "-e", f'tell application "Terminal" to get visible of window id {int(rs_[0]["wid"])}'],
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
+            if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
+                nm_ = rows[sel]["name"]
+                if nm_ != zs["name"]: zs.update(name=nm_, since=time.time(), done=False)
+                elif not zs["done"] and time.time() - zs["since"] >= 0.25:     # debounce arrow scrolling
+                    zs["done"] = True
+                    if rows[sel]["window"]:
+                        try:
+                            if zoom_to(nm_, outline): sel_seen[0] = None; last = 0
+                        except Exception as e: msg = f"! {e}"
             if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None)
             if outline and (gf["behind"] or hidden[0]): outline._send("hide")
             elif outline:
