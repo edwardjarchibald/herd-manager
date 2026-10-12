@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.4 - 2026-10-12
+
+### Added
+- Attention flash (`attention_flash`, default true): a session's dot flashes yellow at about 1 Hz when its agent is `done` (finished) or `blocked` (waiting for input or approval). The signal is herdr's agent lifecycle: `agent_status` from `herdr pane list`, plus `state_change_seq` from `herdr api snapshot`, so each new done/blocked event counts once. It stops once you select the session or its Terminal window is frontmost, until the next event. Plain shells (no agent) never flash. The selected row uses yellow on the slate-blue selection.
+- The terminal bell is not covered: herdr does not expose a bell flag, and Terminal's AppleScript has none either.
+
 ## 0.6.3 - 2026-10-12
 
 ### Changed

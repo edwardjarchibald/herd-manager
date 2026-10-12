@@ -39,6 +39,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
     "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
+    "attention_flash":     (True,  None, "flash a session's dot yellow (~1 Hz) when its agent is done or blocked (waiting for you), until you select or focus it"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
@@ -951,6 +952,10 @@ def sessions():
         if auto_names(ws=ws, ps=ps): ws = workspaces()      # names follow cwd/branch changes
     except SystemExit: pass
     recs = _locked(lambda d: dict(d))
+    try:   # herdr agent lifecycle: status + state_change_seq (a new seq = a new done/blocked event)
+        snap = json.loads(subprocess.run(["herdr", "api", "snapshot"], capture_output=True, text=True, timeout=3).stdout)["result"]["snapshot"]
+        seq = {a["terminal_id"]: a.get("state_change_seq") for a in snap.get("agents", [])}
+    except Exception: seq = {}
     rows = []
     for w in ws:
         p = next((x for x in ps if x["workspace_id"] == w["workspace_id"]), {})
@@ -961,7 +966,8 @@ def sessions():
         label = w["label"]
         rows.append({"name": label, "herd": True,
                      "window": label in recs, "cwd": detail_cwd(p.get("foreground_cwd") or p.get("cwd", "")),
-                     "cmd": cmd, "agent": p.get("agent_status", "")})
+                     "cmd": cmd, "agent": p.get("agent_status", ""),
+                     "att": f"{p['agent_status']}:{seq.get(p.get('terminal_id'))}" if p.get("agent") and p.get("agent_status") in ("done", "blocked") else None})
     return rows
 
 def start_dock():
@@ -1289,6 +1295,7 @@ def manager():
             curses.init_pair(3, curses.COLOR_YELLOW, -1); SEL_BG = SEL_256 if curses.COLORS >= 256 else curses.COLOR_BLUE
             curses.init_pair(4, curses.COLOR_WHITE, SEL_BG)                 # selected row: white on slate blue
             curses.init_pair(7, curses.COLOR_GREEN, SEL_BG)                 # its dot stays green
+            curses.init_pair(8, curses.COLOR_YELLOW, SEL_BG)                # attention flash on the selection
             curses.init_pair(5, curses.COLOR_RED, -1); curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
@@ -1342,7 +1349,8 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.3")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.4")
+        att_ack = {}                                                   # session -> acknowledged attention key
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
@@ -1397,6 +1405,15 @@ def manager():
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
             zoom_pending = False
+            if rows: att_ack[rows[sel]["name"]] = rows[sel].get("att")          # selecting acknowledges
+            if rows and any(r_.get("att") and r_["att"] != att_ack.get(r_["name"]) for r_ in rows) and time.time() - gf.get("att_t", 0) > 1.0:
+                gf["att_t"] = time.time()                                  # focusing its window acknowledges too
+                fw_ = subprocess.run(["osascript", "-e", 'tell application "System Events" to set fp to name of first process whose frontmost is true\nif fp is "Terminal" then tell application "Terminal" to return id of front window'],
+                                     capture_output=True, text=True).stdout.strip()
+                if fw_.isdigit():
+                    recs_ = _locked(lambda d: dict(d))
+                    for r_ in rows:
+                        if recs_.get(r_["name"], {}).get("wid") == int(fw_): att_ack[r_["name"]] = r_.get("att")
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
                 if nm_ != zs["name"]:
@@ -1420,6 +1437,7 @@ def manager():
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
+            cfg_flash = cfg("attention_flash")
             for i, r in enumerate(rows[top:top + list_h]):
                 y = i; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
@@ -1427,10 +1445,14 @@ def manager():
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
+                flash = (cfg_flash and r.get("att") and r["att"] != att_ack.get(r["name"])
+                         and int(time.time() * 2) % 2 == 0)              # ~1 Hz: on 0.5 s, off 0.5 s
                 if idx == sel:
                     put(y, 0, (line + sub).ljust(W - 1), attr)
-                    put(y, 1, mark, C(7) | curses.A_BOLD)                # own pair: green dot on the selection bg
-                else: put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
+                    put(y, 1, mark, (C(8) if flash else C(7)) | curses.A_BOLD)   # own pair on the selection bg
+                else:
+                    put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
+                    if flash: put(y, 1, "\u25cf", C(3) | curses.A_BOLD)       # yellow filled dot
             py = H - 1                                   # the one bottom line
             pfx = " > "
             put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)

@@ -101,6 +101,7 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `dock_min_width` | `920` | | Minimum width (px) of the dock-mode left panel (manager + dock) |
 | `dock_panel_fraction` | `0.3` | | Dock-mode left panel width as a fraction of the tiled width |
 | `zoom_dim` | `0.85` | `HERD_ZOOM_DIM` | Opacity of the dark scrim under a zoomed window (0 = off) |
+| `attention_flash` | `true` | | Flash a session's dot yellow (~1 Hz) when its agent is done or blocked, until you select or focus it |
 | `zoom_on_select` | `true` | | Zoom the selected session's window automatically (250 ms debounce); Z unzooms until the selection changes |
 | `zoom_scale` | `0.8` | | Zoomed window size as a fraction of the terminal area |
 | `max_terminals` | `0` | | Max sessions; 0 = automatic (rows the manager shows at `manager_font_min`) |
