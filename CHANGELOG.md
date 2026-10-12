@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.13 - 2026-10-12
+
+### Changed
+- herdr state is pushed to the manager instead of polled. The 2 s `workspace list` / `pane list` / `api snapshot` poll is gone. A background thread holds an `events.subscribe` on herdr's API socket covering `pane.created/closed/exited/updated/agent_detected`, `workspace.created/closed/updated/renamed`, `layout.updated`, and `pane.agent_status_changed` (one per pane, since herdr requires a `pane_id` for that one). Each event wakes the UI loop for one refresh. Pane create/close/exit re-subscribes. A drop reconnects with backoff (1 s doubling to 30 s) and then resyncs once. It never falls back to polling. Log lines: `herdr events: subscribed|down|re-subscribing`, `herdr event: <pane> -> <status>`.
+- The auto-reload check (a stat of bin/herd) still runs every 2 s.
+
 ## 0.6.12 - 2026-10-12
 
 ### Fixed

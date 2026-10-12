@@ -995,6 +995,58 @@ def sessions():
                      "att": f"{p['agent_status']}:{seq.get(p.get('terminal_id'))}" if p.get("agent") and p.get("agent_status") in ("done", "blocked") else None})
     return rows
 
+class HerdrEvents:
+    """herdr state changes pushed over its API socket (events.subscribe) instead of polling (0.6.13).
+    A daemon thread holds one subscription: the global pane/workspace/layout events plus
+    pane.agent_status_changed for every pane (herdr needs a pane_id per agent-status subscription). Every
+    event sets `dirty`, and the UI loop refreshes once per wake (bursts coalesce). On pane.created, closed,
+    or exited it re-subscribes so the per-pane list stays complete. Any drop means reconnect with backoff
+    (1 s doubling to 30 s), then mark dirty, so the UI takes one full resync snapshot. It never falls back to polling."""
+    GLOBAL = ["pane.created", "pane.closed", "pane.exited", "pane.updated", "pane.agent_detected",
+              "workspace.created", "workspace.closed", "workspace.updated", "workspace.renamed", "layout.updated"]
+    RESUB = {"pane_created", "pane_closed", "pane_exited", "pane.created", "pane.closed", "pane.exited"}
+    def __init__(self):
+        import threading
+        self.dirty = threading.Event(); self.dirty.set(); self.up = False; self.n = 0; self.err = ""
+        threading.Thread(target=self._run, daemon=True).start()
+    def take(self):
+        if self.dirty.is_set(): self.dirty.clear(); return True
+        return False
+    def _sock_path(self):
+        try: return subprocess.run(["herdr", "status", "server"], capture_output=True, text=True, timeout=3).stdout.split("socket:")[1].split()[0]
+        except Exception: return os.path.expanduser("~/.config/herdr/herdr.sock")
+    def _run(self):
+        import socket
+        back = 1.0
+        while True:
+            try:
+                snap = json.loads(subprocess.run(["herdr", "api", "snapshot"], capture_output=True, text=True, timeout=5).stdout)["result"]["snapshot"]
+                subs = [{"type": t} for t in self.GLOBAL] + [{"type": "pane.agent_status_changed", "pane_id": p["pane_id"]} for p in snap.get("panes", [])]
+                sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sk.connect(self._sock_path())
+                sk.sendall((json.dumps({"id": "herd-sub", "method": "events.subscribe", "params": {"subscriptions": subs}}) + "\n").encode())
+                f = sk.makefile("r", encoding="utf-8")
+                first = json.loads(f.readline() or "{}")
+                if "error" in first or not first: raise RuntimeError(f"subscribe failed: {first.get('error') or 'EOF'}")
+                self.up = True; back = 1.0; self.dirty.set()                 # (re)connected: one resync
+                _herd_log(f"herdr events: subscribed ({len(subs)} subscriptions)")
+                resub = False
+                for line in f:
+                    try: ev = json.loads(line)
+                    except ValueError: continue
+                    self.n += 1; self.dirty.set()
+                    d = ev.get("data") if isinstance(ev.get("data"), dict) else ev
+                    kind = d.get("type") or ev.get("event") or ev.get("type") or "?"
+                    if kind in ("pane_agent_status_changed", "pane.agent_status_changed"):
+                        _herd_log(f"herdr event: {d.get('pane_id')} -> {d.get('agent_status')}")
+                    if kind in self.RESUB: resub = True; break
+                sk.close(); self.up = False
+                if resub: _herd_log(f"herdr events: {kind}, re-subscribing"); continue
+                raise RuntimeError("subscription closed")
+            except Exception as e:
+                self.up = False; self.err = str(e)[:120]
+                _herd_log(f"herdr events: down ({self.err}); retry in {back:.0f}s")
+                time.sleep(back); back = min(back * 2, 30.0)
+
 def start_dock():
     """Launch helper/herd-dock.swift (compiled on first use into ~/.cache/herd): dock outline overlay +
     drop detection. It exits when the returned pipe closes. None if disabled/unavailable."""
@@ -1456,7 +1508,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.12")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.13")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1475,6 +1527,7 @@ def manager():
                     time.sleep(1.0)
             threading.Thread(target=run, daemon=True).start()
         if not os.environ.get("HERD_TEST_SANDBOX"): _focus_watch()
+        hev = HerdrEvents(); last_rl = [time.time()]
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
@@ -1504,8 +1557,8 @@ def manager():
             except Exception: v = ""
             curses.noecho(); curses.curs_set(0); scr.timeout(250); return v
         while True:
-            if time.time() - last > 2:
-                maybe_reload()
+            if time.time() - last_rl[0] > 2: last_rl[0] = time.time(); maybe_reload()   # own-file mtime stat only
+            if last == 0 or hev.take():                                 # herdr pushed a change (or local action)
                 try:
                     rows = sessions()
                     if want_sel[0]:
