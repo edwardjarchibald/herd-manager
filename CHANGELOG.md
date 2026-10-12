@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.15 - 2026-10-12
+
+### Changed
+- Manager rows: drop the teal done highlight. done rows use the default look again (same as idle). **working** rows get a full-width dark-on-orange highlight instead (new key `working_color_256`, default 208 = #ff8700; clearly distinct from the blocked yellow ~220). Selected beats orange (blue); blocked still beats everything. Window outlines are unchanged: yellow for blocked, blue for selected/zoomed, none for working/done/idle unless they are the blue target.
+- Config key `done_color_256` is replaced by `working_color_256`. `attention_highlight` remains the master switch: off = no yellow and no orange, only the blue selection/zoom outline. Config `_doc` texts updated.
+
 ## 0.6.14 - 2026-10-12
 
 ### Changed

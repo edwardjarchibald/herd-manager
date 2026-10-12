@@ -39,7 +39,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
     "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
-    "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), done = whole row dark-on-teal (selection wins), no outline for done (alias: attention_flash)"),
+    "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), working = whole row dark-on-orange (selection wins), done/idle = default look, no outline for working/done (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
@@ -48,7 +48,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
     "manager_font_max":    (16,    None, "dock mode: largest manager font size tried (shrinks until all sessions fit)"),
     "manager_font_min":    (9,     None, "dock mode: smallest manager font size allowed"),
-    "done_color_256":      (37,    None, "manager row background for sessions herdr reports done (dark text), xterm-256 colour index (37 = #00afaf teal); the selected row stays blue"),
+    "working_color_256":   (208,   None, "manager row background for sessions herdr reports working (dark text), xterm-256 colour index (208 = #ff8700 orange); the selected row stays blue"),
     "selection_color_256": (25,    None, "manager selected-row background, xterm-256 colour index (25 = #005faf)"),
     "outline":             (True,  None, "draw the outline around the selected session's window (env HERD_NO_OUTLINE=1 disables)"),
     "outline_rgb":         ("0 95 175", "HERD_OUTLINE_RGB", "outline colour 'r g b' (0-255); default = selection colour #005faf"),
@@ -436,7 +436,7 @@ def _jxa(src, arg):
 
 SEL_256 = cfg("selection_color_256")           # selection colour: xterm-256 #25 = #005faf (slate blue); outline uses the same RGB
 SEL_RGB = cfg("outline_rgb")
-DONE_256 = cfg("done_color_256")
+WORKING_256 = cfg("working_color_256")
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
 MGR_W = cfg("manager_width")
 
@@ -1446,7 +1446,7 @@ def manager():
             curses.init_pair(4, curses.COLOR_WHITE, SEL_BG)                 # selected row: white on slate blue
             curses.init_pair(7, curses.COLOR_GREEN, SEL_BG)                 # its dot stays green
             curses.init_pair(8, curses.COLOR_YELLOW, SEL_BG)                # attention flash on the selection
-            curses.init_pair(9, curses.COLOR_BLACK, DONE_256 if curses.COLORS >= 256 else curses.COLOR_CYAN)   # done row: dark on teal
+            curses.init_pair(9, curses.COLOR_BLACK, WORKING_256 if curses.COLORS >= 256 else curses.COLOR_RED)   # working row: dark on orange
             curses.init_pair(5, curses.COLOR_RED, -1); curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
@@ -1508,7 +1508,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.14")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.15")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1653,7 +1653,7 @@ def manager():
                 elif idx == sel:
                     put(y, 0, (line + sub).ljust(W - 1), attr)
                     put(y, 1, mark, C(7) | curses.A_BOLD)   # own pair on the selection bg
-                elif st_ == "done":                                       # whole row, dot to full width: dark on teal
+                elif cfg_hl and r.get("agent") == "working":               # whole row, dot to full width: dark on orange
                     put(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD)
                 else:
                     put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
