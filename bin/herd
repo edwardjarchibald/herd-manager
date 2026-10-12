@@ -1106,6 +1106,22 @@ def front_nonterm_pid_any():
         if p and int(pol) == 0 and b != "com.apple.Terminal": return p
     return ""
 
+def set_sessions_visible(visible):
+    """H in the manager: hide/show every herd-tracked SESSION window (not the manager; never other
+    windows) via Terminal's `visible` property. Sessions keep running and stay attached; nothing goes to
+    the Dock. Showing retiles, which keeps the zoom state. Returns the number of windows changed."""
+    recs = _locked(lambda d: dict(d))
+    wids = [int(r["wid"]) for k, r in recs.items() if k != MGR and r.get("wid")]
+    if not wids: return 0
+    v = "true" if visible else "false"
+    lines = [f"    try\n      set visible of window id {w} to {v}\n    end try" for w in wids]
+    with keep_front():
+        subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
+                       capture_output=True)
+        if visible:
+            tile(quiet=True); refocus_manager()
+    return len(wids)
+
 def manager():
     import curses, signal
     if os.environ.get("HERD_TEST_SANDBOX"):   # headless tests: fake rows, every mutation only logged
@@ -1192,10 +1208,11 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.6")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.7")
+        hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
-                ["(K) kill", "(A) killall", "(Q) quit", "(?/H) hints", "(F) toggle focus"]]
+                ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hide", "(?) help", "(F) toggle focus"]]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
             lines, cur_ = [], ""
@@ -1238,7 +1255,7 @@ def manager():
             if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
                 gf["t"] = time.time()
                 if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
-            if outline and gf["behind"]: outline._send("hide")
+            if outline and (gf["behind"] or hidden[0]): outline._send("hide")
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
@@ -1270,7 +1287,7 @@ def manager():
             elif msg: put(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
             else: put(py, 0, pfx + "click for broadcast", curses.A_DIM)
             if show_help[0]:                             # hints overlay: centered box over the list
-                hl = [l for items in HELP for l in wrap_items(items, max(1, W - 5))] + ["", "? / H / Esc: close"]
+                hl = [l for items in HELP for l in wrap_items(items, max(1, W - 5))] + ["", "? / Esc: close"]
                 bw = min(W - 1, max(len(l) for l in hl) + 4); bh = len(hl) + 2
                 bx = max(0, (W - 1 - bw) // 2); by = max(0, (H - 2 - bh) // 2)
                 put(by, bx, "\u250c" + "\u2500" * (bw - 2) + "\u2510", C(1))
@@ -1349,11 +1366,16 @@ def manager():
             cur = rows[sel]["name"] if rows else None
             try:
                 if ch == "Q": return
-                elif ch in ("H", "?"): show_help[0] = not show_help[0]
+                elif ch == "?": show_help[0] = not show_help[0]
+                elif ch == "H":
+                    hidden[0] = not hidden[0]
+                    n_ = set_sessions_visible(not hidden[0]); sel_seen[0] = None; last = 0
+                    msg = (f"hid {n_} windows (H shows them)" if hidden[0] else f"showing {n_} windows")
                 elif k == 27 and show_help[0]: show_help[0] = False
                 elif k in (curses.KEY_DOWN,) or ch == "j": sel += 1
                 elif k in (curses.KEY_UP,) or ch == "k": sel -= 1
                 elif ch == "O" and rows:                                   # Enter does nothing in list mode
+                    if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
                     cur = rows[sel]["name"]
                     if rows[sel]["window"] and not stub_open:           # has a window: detach + close it
                         msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager()
@@ -1369,6 +1391,7 @@ def manager():
                     else: msg = "kill all cancelled"
                 elif ch == "K" and cur: kill(cur, quiet=True); refocus_manager(); msg = f"killed {cur}"; last = 0
                 elif ch == "N":
+                    if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
@@ -1377,6 +1400,7 @@ def manager():
                     gf["behind"] = not gf["on"]; gf["t"] = time.time()
                     sel_seen[0] = None                                 # outline re-follows (or hides while behind)
                 elif ch == "Z" and cur:
+                    if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
                     msg = mgr_zoom(cur, outline); last = 0
             except SystemExit as e: msg = f"! {e}"
             except Exception as e: msg = f"! {e}"

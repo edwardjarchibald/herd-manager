@@ -101,7 +101,7 @@ Config file `~/.config/herd/config.json` (JSON):
 
 ### Manager keys
 
-Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the hints. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window gets the largest font up to 16 that fits every session on one line.
+Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the help overlay. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window gets the largest font up to 16 that fits every session on one line.
 
 | Key | Action |
 |---|---|
@@ -112,7 +112,8 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 | `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
-| `?` / `H` | Toggle the hints overlay (Esc also closes it) |
+| `?` | Toggle the help overlay (Esc also closes it) |
+| `H` | Toggle hide: hide all herd session windows (not the manager, not other apps' windows) to see what's under them; H again shows them, retiled (zoom kept). O/N/Z unhide first |
 | `F` | Focus toggle for the whole herd group (manager + every herd-tracked Terminal window, never other Terminal windows). First press: raises them all above other apps, manager frontmost with keyboard focus. Second press: re-activates every app that was in front of the group, in their original order, so the original top app is on top again and their windows cover the group (log: `~/.cache/herd/focus.log`). Nothing is minimized or hidden; click the manager to get it back. The outline hides while the group is behind |
 | `Q` | Quit the manager (sessions keep running) |
 | click `> click for broadcast` (bottom line) | Live broadcast: every keystroke goes to all sessions with an open window (drive vi in all of them at once); nothing is echoed |

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.7 - 2026-10-11
+
+### Changed
+- `?` alone toggles the help overlay (Esc closes it).
+- `H` is now "toggle hide": it hides every herd session window (not the manager, never other windows or the docked app) by setting Terminal's `visible` to false, so you can see what is underneath. Sessions keep running and stay attached, and nothing goes to the Dock. Pressing H again shows them and retiles them, keeping the zoom state.
+- The outline hides while the windows are hidden. O, N and Z unhide first, then act.
+- Hints: `(H) toggle hide`, `(?) help`.
+
 ## 0.5.6 - 2026-10-11
 
 ### Changed
