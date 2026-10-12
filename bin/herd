@@ -927,13 +927,19 @@ class Outline:
             self.p = subprocess.Popen([binp, os.environ.get("HERD_OUTLINE_PX", "6"), radius, *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, text=True)
         except (OSError, subprocess.SubprocessError): self.p = None
+    def alive(self):
+        """Restart the helper if it died (crash, killed)."""
+        if self.p and self.p.poll() is not None:
+            self.__init__()
+        return bool(self.p)
     def _send(self, line):
-        if not self.p or line == self.last: return
+        if not self.alive() or line == self.last: return
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def follow(self, name, force=False):
-        """Point the border at session `name`'s recorded window (or hide). Polls bounds ~1/s."""
-        if not self.p: return
+        """Point the border at session `name`'s window, at its LIVE frame (Terminal bounds, re-read ~1/s,
+        so manual moves are followed), or hide if it has no window."""
+        if not self.alive(): return
         if not force and time.time() - self.t < 1.0: return
         self.t = time.time()
         r = _locked(lambda d: d.get(name)) if name else None
@@ -1208,7 +1214,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.5.7")
+        _herd_log(f"manager start pid={os.getpid()} version=0.5.8")
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
@@ -1255,6 +1261,12 @@ def manager():
             if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
                 gf["t"] = time.time()
                 if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
+            if hidden[0] and time.time() - gf.get("ht", 0) > 1.0:      # stale hide flag: windows shown again?
+                gf["ht"] = time.time()
+                rs_ = [r_ for k_, r_ in _locked(lambda d: dict(d)).items() if k_ != MGR]
+                if rs_ and subprocess.run(["osascript", "-e", f'tell application "Terminal" to get visible of window id {int(rs_[0]["wid"])}'],
+                                          capture_output=True, text=True).stdout.strip() == "true":
+                    hidden[0] = False; sel_seen[0] = None
             if outline and (gf["behind"] or hidden[0]): outline._send("hide")
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
@@ -1340,8 +1352,17 @@ def manager():
                 if exit_live:
                     bc["focus"] = False; esc_until[0] = time.time() + 0.3; msg = "live broadcast off"
                 continue
+            if time.time() - gf.get("dump", 0) > 2.0:                 # diagnostics for `cat ~/.cache/herd/manager-state.json`
+                gf["dump"] = time.time()
+                try:
+                    json.dump({"t": time.strftime("%H:%M:%S"), "selected": rows[sel]["name"] if rows else None, "hidden": hidden[0],
+                               "behind": gf["behind"], "focus_on": gf["on"], "outline_pid": outline.p.pid if outline and outline.p else None,
+                               "outline_last": outline.last if outline else None}, open(os.path.expanduser("~/.cache/herd/manager-state.json"), "w"))
+                except Exception: pass
             k = read_key()
             if k is None: continue
+            if k != -1 and gf["behind"]:                               # a key reached the manager: Terminal is front
+                gf["behind"] = False; sel_seen[0] = None
             if k != -1: k_last[0] = k
             if k == -1: continue
             if k == curses.KEY_RESIZE: continue

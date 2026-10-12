@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.5.7 - 2026-10-11
+## 0.5.8 - 2026-10-12
+
+### Fixed
+- Outline robustness:
+  - The helper is restarted if it died.
+  - A stale "behind" flag (from F) is cleared as soon as any key reaches the manager, not only when the once-a-second frontmost check sees Terminal.
+  - A stale H-hidden flag is cleared when the session windows are visible again.
+  - The outline keeps following the selected window's live frame, so manual moves are followed.
+- The manager writes its outline/selection state to `~/.cache/herd/manager-state.json` every 2 s for diagnosis.
+- The 0.5.7 changelog date is corrected.
+
+## 0.5.7 - 2026-10-12
 
 ### Changed
 - `?` alone toggles the help overlay (Esc closes it).
