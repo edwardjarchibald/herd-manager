@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.5 - 2026-10-12
+
+### Fixed
+- The attention flash was irregular. It was computed per frame from the current status, so it stopped whenever the agent left done/blocked (e.g. working again) and restarted on the next event. It was also cleared whenever Terminal's front window was the session's. Its phase stalled while the UI thread waited on a System Events/osascript frontmost query (100+ ms, every second).
+- Attention is now latched: it is set on a new done/blocked event and kept through status flips. It is cleared only by selecting the session or by its window *becoming* Terminal's front window while Terminal is frontmost (a click). The focus check runs in a background thread. The phase is wall-clock (0.5 s on / 0.5 s off). The dot and the name flash together as a yellow block.
+- Attention SET/CLEAR events (with reasons) are logged to `~/.cache/herd/focus.log`.
+
 ## 0.6.4 - 2026-10-12
 
 ### Added

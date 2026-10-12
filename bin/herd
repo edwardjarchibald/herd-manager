@@ -1349,8 +1349,24 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.4")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.5")
         att_ack = {}                                                   # session -> acknowledged attention key
+        att_on = {}                                                    # session -> latched attention key
+        front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
+        def _focus_watch():                                            # off the UI thread: osascript can take 100+ ms
+            import threading
+            def run():
+                while True:
+                    try:
+                        o = subprocess.run(["osascript", "-l", "JavaScript", "-e",
+                            "ObjC.import('AppKit'); var a=$.NSWorkspace.sharedWorkspace.frontmostApplication; "
+                            "(!a.isNil() && ObjC.unwrap(a.bundleIdentifier)=='com.apple.Terminal') ? String(Application('Terminal').windows[0].id()) : ''"],
+                            capture_output=True, text=True, timeout=3).stdout.strip()
+                        front_win[0] = int(o) if o.isdigit() else None
+                    except Exception: front_win[0] = None
+                    time.sleep(1.0)
+            threading.Thread(target=run, daemon=True).start()
+        if not os.environ.get("HERD_TEST_SANDBOX"): _focus_watch()
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
@@ -1405,15 +1421,24 @@ def manager():
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
             zoom_pending = False
-            if rows: att_ack[rows[sel]["name"]] = rows[sel].get("att")          # selecting acknowledges
-            if rows and any(r_.get("att") and r_["att"] != att_ack.get(r_["name"]) for r_ in rows) and time.time() - gf.get("att_t", 0) > 1.0:
-                gf["att_t"] = time.time()                                  # focusing its window acknowledges too
-                fw_ = subprocess.run(["osascript", "-e", 'tell application "System Events" to set fp to name of first process whose frontmost is true\nif fp is "Terminal" then tell application "Terminal" to return id of front window'],
-                                     capture_output=True, text=True).stdout.strip()
-                if fw_.isdigit():
-                    recs_ = _locked(lambda d: dict(d))
-                    for r_ in rows:
-                        if recs_.get(r_["name"], {}).get("wid") == int(fw_): att_ack[r_["name"]] = r_.get("att")
+            # attention latch: set on a NEW done/blocked event (status+seq not yet acknowledged); stays set through
+            # transient status flips; cleared only by selecting the session or clicking its window to the front.
+            for r_ in rows:
+                k_ = r_.get("att")
+                if k_ and k_ != att_ack.get(r_["name"]) and r_["name"] not in att_on:
+                    att_on[r_["name"]] = k_; _herd_log(f"attention SET {r_['name']} ({k_})")
+            if rows:
+                nm_ = rows[sel]["name"]
+                if nm_ in att_on: _herd_log(f"attention CLEAR {nm_} (selected)"); att_on.pop(nm_)
+                if rows[sel].get("att"): att_ack[nm_] = rows[sel]["att"]
+            fw_ = front_win[0]                                          # from the background focus watcher
+            if fw_ and fw_ != front_win[1]:                             # Terminal front window CHANGED (a click)
+                front_win[1] = fw_
+                recs_ = _locked(lambda d: dict(d))
+                for r_ in rows:
+                    if recs_.get(r_["name"], {}).get("wid") == fw_:
+                        if r_["name"] in att_on: _herd_log(f"attention CLEAR {r_['name']} (window focused)"); att_on.pop(r_["name"])
+                        if r_.get("att"): att_ack[r_["name"]] = r_["att"]
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
                 if nm_ != zs["name"]:
@@ -1445,14 +1470,13 @@ def manager():
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
-                flash = (cfg_flash and r.get("att") and r["att"] != att_ack.get(r["name"])
-                         and int(time.time() * 2) % 2 == 0)              # ~1 Hz: on 0.5 s, off 0.5 s
+                flash = cfg_flash and r["name"] in att_on and int(time.time() * 2) % 2 == 0   # wall clock: 0.5 s on / 0.5 s off
                 if idx == sel:
                     put(y, 0, (line + sub).ljust(W - 1), attr)
                     put(y, 1, mark, (C(8) if flash else C(7)) | curses.A_BOLD)   # own pair on the selection bg
                 else:
                     put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
-                    if flash: put(y, 1, "\u25cf", C(3) | curses.A_BOLD)       # yellow filled dot
+                    if flash: put(y, 1, "\u25cf " + r["name"], C(3) | curses.A_BOLD | curses.A_REVERSE)   # dot+name: yellow block
             py = H - 1                                   # the one bottom line
             pfx = " > "
             put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
