@@ -53,6 +53,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "outline_rgb":         ("0 95 175", "HERD_OUTLINE_RGB", "outline colour 'r g b' (0-255); default = selection colour #005faf"),
     "outline_px":          (6,     "HERD_OUTLINE_PX", "outline thickness in px"),
     "outline_radius":      (_OUTLINE_RADIUS_DEFAULT, "HERD_OUTLINE_RADIUS", "outline corner radius (16 on macOS 26, 10 before)"),
+    "attention_outline_rgb": ("255 200 0", None, "colour 'r g b' (0-255) of the outline drawn around every session window needing attention (same latch/attention_highlight as the yellow row; not the selected session; hidden under the zoom scrim)"),
 }
 
 CFG_ALIASES = {"attention_highlight": "attention_flash"}   # new key -> old name still accepted
@@ -1034,8 +1035,8 @@ class Outline:
     """Green border around the selected session's herd window, drawn by a tiny Swift helper
     (helper/herd-outline.swift, compiled on first use into ~/.cache/herd). Click-through and
     non-activating; it exits when this pipe closes (manager quit/reload)."""
-    def __init__(self):
-        self.p = None; self.last = None; self.t = 0.0
+    def __init__(self, rgb=None, tag="sel"):
+        self.p = None; self.last = None; self.t = 0.0; self.rgb = rgb; self.tag = tag
         src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-outline.swift")
         binp = os.path.expanduser("~/.cache/herd/herd-outline")
         try:
@@ -1044,18 +1045,18 @@ class Outline:
                 os.makedirs(os.path.dirname(binp), exist_ok=True)
                 if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
             # 6px ring in the selection colour (SEL_RGB).
-            rgb = cfg("outline_rgb").split()
+            rgb = (self.rgb or cfg("outline_rgb")).split()
             self.p = subprocess.Popen([binp, str(cfg("outline_px")), str(cfg("outline_radius")), *rgb], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, text=True)
         except (OSError, subprocess.SubprocessError): self.p = None
     def alive(self):
         """Restart the helper if it died (crash, killed)."""
         if self.p and self.p.poll() is not None:
-            self.__init__()
+            self.__init__(self.rgb, self.tag)
         return bool(self.p)
     def _send(self, line):
         if not self.alive() or line == self.last: return
-        _olog(f"send {line}")
+        _olog(f"send {line}" if self.tag == "sel" else f"[{self.tag}] send {line}")
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def follow(self, name, force=False):
@@ -1082,6 +1083,32 @@ class Outline:
             try: self.p.stdin.close()
             except OSError: pass
             self.p = None
+
+def attention_outline_targets(att_on, highlight, sel_name, recs, suppress):
+    """Sessions whose window gets a yellow attention outline: latched (att_on), highlight enabled, has a
+    herd-recorded window, not the selected session (that one keeps the blue outline). None while H/F hid
+    the windows. While a zoom scrim is up (a zoomed window and zoom_dim > 0) every non-zoomed window is
+    under the scrim, so only the zoomed window itself may keep an attention outline."""
+    if not highlight or suppress: return set()
+    t = {n for n in att_on if n != sel_name and n != MGR and recs.get(n, {}).get("wid")}
+    zoomed = next((k for k, r in recs.items() if k != MGR and r.get("zoom")), None)
+    if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
+    return t
+
+class AttentionOutlines:
+    """One herd-outline helper (yellow) per session needing attention. Each follows its window's live
+    bounds ~1/s (Outline.follow, with its 3-miss tolerance on both sides); a helper is stopped (pipe
+    closed -> it exits) when its session leaves the target set. Never raises or moves any window."""
+    def __init__(self): self.o = {}
+    def update(self, targets):
+        for n in list(self.o):
+            if n not in targets: _olog(f"[att:{n}] stop"); self.o.pop(n).stop()
+        for n in targets:
+            if n not in self.o:
+                self.o[n] = Outline(rgb=cfg("attention_outline_rgb"), tag=f"att:{n}"); _olog(f"[att:{n}] start")
+            self.o[n].follow(n)
+    def stop(self):
+        for n in list(self.o): self.o.pop(n).stop()
 
 def zoom(name):
     """Toggle zoom on session `name`'s window (at most one zoomed). Returns 'on'/'off', or None if no window."""
@@ -1322,6 +1349,7 @@ def manager():
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         k_last = [None]; esc_until = [0.0]
         outline = Outline() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") and cfg("outline") else None
+        att_outlines = AttentionOutlines() if not os.environ.get("HERD_TEST_SANDBOX") and not os.environ.get("HERD_NO_OUTLINE") and cfg("outline") else None
         scrim = Scrim() if not os.environ.get("HERD_TEST_SANDBOX") else None
         dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
         sel_seen = [None]
@@ -1355,7 +1383,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.7")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.8")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
@@ -1464,6 +1492,9 @@ def manager():
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
+            if att_outlines:
+                att_outlines.update(attention_outline_targets(att_on, cfg("attention_highlight"), rows[sel]["name"] if rows else None,
+                                                              _locked(lambda d: dict(d)), gf["behind"] or hidden[0]))
             scr.erase(); H, W = scr.getmaxyx()
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.8 - 2026-10-12
+
+### Added
+- Attention outlines: every herd session window in the latched attention state (the same latch, gated by `attention_highlight`, that makes its manager row yellow) gets a yellow outline with the same thickness and radius as the blue one. It is drawn whether or not anything is zoomed. The selected session never gets one; it keeps the blue outline, which still appears only after zoom.
+- Each attention outline is its own `herd-outline` helper instance started with the colour `attention_outline_rgb` (new config key, default `255 200 0`). It follows its window's live bounds about once a second and reuses the existing 3-miss tolerance on both the manager and helper sides. It is stopped when the latch clears (select or click), and all are hidden while H hides the windows or F sends herd behind.
+- Under the zoom scrim: while a zoomed window has the scrim up (`zoom_dim` > 0), attention outlines of the windows the scrim covers are hidden. Their manager rows stay yellow. With `zoom_dim` 0 they stay visible. The Swift helpers are unchanged. Only herd-recorded windows are targeted, and no window is moved or raised.
+- Attention-outline commands are logged to `~/.cache/herd/outline.log` with an `[att:<session>]` tag.
+
 ## 0.6.7 - 2026-10-12
 
 ### Changed
