@@ -1304,7 +1304,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.1")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.2")
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
@@ -1358,17 +1358,23 @@ def manager():
                 if rs_ and subprocess.run(["osascript", "-e", f'tell application "Terminal" to get visible of window id {int(rs_[0]["wid"])}'],
                                           capture_output=True, text=True).stdout.strip() == "true":
                     hidden[0] = False; sel_seen[0] = None
+            zoom_pending = False
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
-                if nm_ != zs["name"]: zs.update(name=nm_, since=time.time(), done=False)
-                elif not zs["done"] and time.time() - zs["since"] >= 0.25:     # debounce arrow scrolling
+                if nm_ != zs["name"]:
+                    rec_ = _locked(lambda d: d.get(nm_)) if rows[sel]["window"] else None
+                    zs.update(name=nm_, since=time.time(), done=False, will=bool(rec_ and not rec_.get("zoom")))
+                zoom_pending = not zs["done"] and zs.get("will")
+                if nm_ == zs["name"] and not zs["done"] and time.time() - zs["since"] >= 0.25:     # debounce arrow scrolling
                     zs["done"] = True
                     if rows[sel]["window"]:
                         try:
-                            if zoom_to(nm_, outline): sel_seen[0] = None; last = 0
+                            if zoom_to(nm_, outline): sel_seen[0] = nm_; last = 0      # outline already at the zoomed frame
                         except Exception as e: msg = f"! {e}"
-            if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None)
+                    zoom_pending = False; zs["scrim"] = True
+            if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None or zs.pop("scrim", False))
             if outline and (gf["behind"] or hidden[0]): outline._send("hide")
+            elif outline and zoom_pending: outline._send("hide")     # no outline at the tiled spot; zoom_to() shows it zoomed
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 - 2026-10-12
+
+### Changed
+- Zoom on select no longer flashes the outline at the tiled position first. On a selection change that will zoom, the outline is hidden, the window is zoomed, and the outline is shown at the zoomed frame. With `zoom_on_select` off, no window, already zoomed, or unzoomed with Z, the outline behaves as before.
+
 ## 0.6.1 - 2026-10-12
 
 ### Added
