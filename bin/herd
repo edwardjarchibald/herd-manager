@@ -53,7 +53,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "outline_rgb":         ("0 95 175", "HERD_OUTLINE_RGB", "outline colour 'r g b' (0-255); default = selection colour #005faf"),
     "outline_px":          (6,     "HERD_OUTLINE_PX", "outline thickness in px"),
     "outline_radius":      (_OUTLINE_RADIUS_DEFAULT, "HERD_OUTLINE_RADIUS", "outline corner radius (16 on macOS 26, 10 before)"),
-    "attention_outline_rgb": ("255 200 0", None, "colour 'r g b' (0-255) of the outline drawn around every session window needing attention (same latch/attention_highlight as the yellow row; not the selected session; hidden under the zoom scrim)"),
+    "attention_outline_rgb": ("255 200 0", None, "colour 'r g b' (0-255) of the outline drawn around every session window needing attention (same latch/attention_highlight as the yellow row; not the selected session unless it is the zoomed window, which then gets yellow instead of blue; hidden under the zoom scrim)"),
 }
 
 CFG_ALIASES = {"attention_highlight": "attention_flash"}   # new key -> old name still accepted
@@ -1108,14 +1108,20 @@ class Outline:
 
 def attention_outline_targets(att_on, highlight, sel_name, recs, suppress):
     """Sessions whose window gets a yellow attention outline: latched (att_on), highlight enabled, has a
-    herd-recorded window, not the selected session (that one keeps the blue outline). None while H/F hid
-    the windows. While a zoom scrim is up (a zoomed window and zoom_dim > 0) every non-zoomed window is
-    under the scrim, so only the zoomed window itself may keep an attention outline."""
+    herd-recorded window, not the selected session (that one keeps the blue outline) unless it is the
+    zoomed window: a latched zoomed window gets the yellow outline at its zoom rect instead of the blue one.
+    None while H/F hid the windows. While a zoom scrim is up (a zoomed window and zoom_dim > 0) every
+    non-zoomed window is under the scrim, so only the zoomed window itself may keep an attention outline."""
     if not highlight or suppress: return set()
-    t = {n for n in att_on if n != sel_name and n != MGR and recs.get(n, {}).get("wid")}
     zoomed = next((k for k, r in recs.items() if k != MGR and r.get("zoom")), None)
+    t = {n for n in att_on if (n != sel_name or n == zoomed) and n != MGR and recs.get(n, {}).get("wid")}
     if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
     return t
+
+def selected_outline_yellow(att_on, highlight, sel_name, recs):
+    """True when the selected session is the zoomed window and latched in attention: its blue outline is
+    hidden and the yellow attention outline is drawn at the zoom rect instead (back to blue when the latch clears)."""
+    return bool(highlight and sel_name and sel_name in att_on and recs.get(sel_name, {}).get("zoom"))
 
 class AttentionOutlines:
     """Yellow outlines around every session needing attention, all drawn by ONE herd-outline helper in
@@ -1432,9 +1438,10 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.9")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.10")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
+        sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
         front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
         def _focus_watch():                                            # off the UI thread: osascript can take 100+ ms
             import threading
@@ -1505,15 +1512,19 @@ def manager():
                     hidden[0] = False; sel_seen[0] = None
             zoom_pending = False
             # attention latch: set on a NEW done/blocked event (status+seq not yet acknowledged); stays set through
-            # transient status flips; cleared only by selecting the session or clicking its window to the front.
+            # transient status flips; cleared only by an explicit event: selecting the session (arrow/scroll onto it,
+            # or clicking its row, also when already selected) or clicking its window to the front. Being selected
+            # (or zoomed) does NOT clear or pre-acknowledge attention that starts later.
             for r_ in rows:
                 k_ = r_.get("att")
                 if k_ and k_ != att_ack.get(r_["name"]) and r_["name"] not in att_on:
                     att_on[r_["name"]] = k_; _herd_log(f"attention SET {r_['name']} ({k_})")
             if rows:
                 nm_ = rows[sel]["name"]
-                if nm_ in att_on: _herd_log(f"attention CLEAR {nm_} (selected)"); att_on.pop(nm_)
-                if rows[sel].get("att"): att_ack[nm_] = rows[sel]["att"]
+                if nm_ != sel_ev[1] or sel_ev[0] == nm_:                # selection event (moved onto it / row clicked)
+                    if nm_ in att_on: _herd_log(f"attention CLEAR {nm_} (selected)"); att_on.pop(nm_)
+                    if rows[sel].get("att"): att_ack[nm_] = rows[sel]["att"]
+                sel_ev[0] = None; sel_ev[1] = nm_
             fw_ = front_win[0]                                          # from the background focus watcher
             if fw_ and fw_ != front_win[1]:                             # Terminal front window CHANGED (a click)
                 front_win[1] = fw_
@@ -1538,6 +1549,8 @@ def manager():
             if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None or zs.pop("scrim", False))
             if outline and (gf["behind"] or hidden[0]): outline._send("hide")
             elif outline and zoom_pending: outline._send("hide")     # no outline at the tiled spot; zoom_to() shows it zoomed
+            elif outline and rows and selected_outline_yellow(att_on, cfg("attention_highlight"), rows[sel]["name"], _locked(lambda d: dict(d))):
+                outline._send("hide"); sel_seen[0] = None              # latched zoomed window: yellow instead of blue
             elif outline:
                 cur_name = rows[sel]["name"] if rows else None
                 outline.follow(cur_name, force=cur_name != sel_seen[0]); sel_seen[0] = cur_name
@@ -1659,7 +1672,7 @@ def manager():
                     if my >= list_h: continue
                     idx = top + my
                     if idx >= len(rows): continue
-                    sel = idx; continue                                # single click selects
+                    sel = idx; sel_ev[0] = rows[idx]["name"]; continue  # single click selects (explicit select event)
                 else: continue
             ch = chr(k) if 0 <= k < 256 else ""
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc

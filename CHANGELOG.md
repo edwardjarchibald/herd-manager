@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.10 - 2026-10-12
+
+### Changed
+- A zoomed window that needs attention gets the yellow outline too: when the zoomed window's session is latched (`att_on`), including when it is the selected session, the yellow attention outline is drawn at its zoom rect instead of the blue one. When the latch clears, the outline goes back to blue.
+- Attention clearing is now event-based instead of "selected means clear". The latch clears when you select the session (move the selection onto it, or click its row, also when it is already selected) or click its window to the front. Attention that starts while a session is already selected or zoomed now latches and stays until one of those actions.
+- Manager rows: a latched row shows yellow even when it is selected (same as 0.6.7).
+
 ## 0.6.9 - 2026-10-12
 
 ### Changed
