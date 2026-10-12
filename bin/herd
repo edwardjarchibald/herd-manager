@@ -39,7 +39,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "dock_min_width":      (920,   None, "minimum width (px) of the dock-mode left panel (manager + dock); panel = max(30% of width, this)"),
     "dock_panel_fraction": (0.3,   None, "dock-mode left panel width as a fraction of the tiled width"),
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
-    "attention_highlight": (True,  None, "highlight a session's whole row (yellow background) when its agent is done or blocked (waiting for you), until you select it or click its window (alias: attention_flash)"),
+    "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), done = whole row dark-on-teal (selection wins), no outline for done (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
@@ -48,12 +48,13 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
     "manager_font_max":    (16,    None, "dock mode: largest manager font size tried (shrinks until all sessions fit)"),
     "manager_font_min":    (9,     None, "dock mode: smallest manager font size allowed"),
+    "done_color_256":      (37,    None, "manager row background for sessions herdr reports done (dark text), xterm-256 colour index (37 = #00afaf teal); the selected row stays blue"),
     "selection_color_256": (25,    None, "manager selected-row background, xterm-256 colour index (25 = #005faf)"),
     "outline":             (True,  None, "draw the outline around the selected session's window (env HERD_NO_OUTLINE=1 disables)"),
     "outline_rgb":         ("0 95 175", "HERD_OUTLINE_RGB", "outline colour 'r g b' (0-255); default = selection colour #005faf"),
     "outline_px":          (6,     "HERD_OUTLINE_PX", "outline thickness in px"),
     "outline_radius":      (_OUTLINE_RADIUS_DEFAULT, "HERD_OUTLINE_RADIUS", "outline corner radius (16 on macOS 26, 10 before)"),
-    "attention_outline_rgb": ("255 200 0", None, "colour 'r g b' (0-255) of the outline drawn around every session window needing attention (same latch/attention_highlight as the yellow row; not the selected session unless it is the zoomed window, which then gets yellow instead of blue; hidden under the zoom scrim)"),
+    "attention_outline_rgb": ("255 200 0", None, "colour 'r g b' (0-255) of the outline around every session window herdr reports blocked (attention_highlight on); overrides the blue selected/zoomed outline; non-zoomed ones hidden under the zoom scrim"),
 }
 
 CFG_ALIASES = {"attention_highlight": "attention_flash"}   # new key -> old name still accepted
@@ -435,6 +436,7 @@ def _jxa(src, arg):
 
 SEL_256 = cfg("selection_color_256")           # selection colour: xterm-256 #25 = #005faf (slate blue); outline uses the same RGB
 SEL_RGB = cfg("outline_rgb")
+DONE_256 = cfg("done_color_256")
 MGR = "__manager__"   # windows.json key for the manager window (role: manager)
 MGR_W = cfg("manager_width")
 
@@ -1163,35 +1165,32 @@ class Outline:
             self.p = None
 
 def attention_outline_targets(att_on, highlight, sel_name, recs, suppress):
-    """Sessions whose window gets a yellow attention outline: latched (att_on), highlight enabled, has a
-    herd-recorded window, not the selected session (that one keeps the blue outline) unless it is the
-    zoomed window: a latched zoomed window gets the yellow outline at its zoom rect instead of the blue one.
-    None while H/F hid the windows. While a zoom scrim is up (a zoomed window and zoom_dim > 0) every
-    non-zoomed window is under the scrim, so only the zoomed window itself may keep an attention outline."""
-    if not highlight or suppress: return set()
-    zoomed = next((k for k, r in recs.items() if k != MGR and r.get("zoom")), None)
-    t = {n for n in att_on if (n != sel_name or n == zoomed) and n != MGR and recs.get(n, {}).get("wid")}
-    if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
-    return t
+    """Sessions whose window gets a yellow outline: herdr-blocked ones (see desired_outlines())."""
+    return desired_outlines(att_on, highlight, sel_name, recs, suppress)[1]
+
+def blocked_names(att_on):
+    """Sessions herdr currently reports blocked (att_on values are '<status>:<seq>')."""
+    return {n for n, k in att_on.items() if str(k).startswith("blocked:")}
 
 def desired_outlines(att_on, highlight, sel_name, recs, suppress):
-    """The one place deciding both outlines, from current in-memory state. Returns (blue_name, yellow_set).
-    Blue goes on the zoomed window if one is zoomed (even when it is not the selected session), else on the
-    selected session. A latched zoomed window gets yellow instead of blue, so a zoomed window always has
-    exactly one outline. Yellow never duplicates the blue target. Both empty while H/F hid the windows."""
+    """The one place deciding both outlines (0.6.14). Returns (blue_name, yellow_set).
+    Only two kinds: yellow for blocked sessions, blue for the zoomed window (if any) else the selected one.
+    Blocked overrides blue, so the zoomed window is always exactly blue or yellow. done/working/idle get
+    no outline unless they are the blue target. attention_highlight off = no yellow at all (blue only)."""
     if suppress: return None, set()
     zoomed = next((k for k, r in recs.items() if k != MGR and r.get("zoom") and r.get("wid")), None)
     blue = zoomed or sel_name
-    if blue and highlight and blue in att_on and blue == zoomed: blue = None
     if not highlight: return blue, set()
-    t = {n for n in att_on if n != blue and n != MGR and recs.get(n, {}).get("wid")}
+    blk = blocked_names(att_on)
+    if blue in blk: blue = None
+    t = {n for n in blk if n != MGR and recs.get(n, {}).get("wid")}
     if zoomed and config()["zoom_dim"] > 0: t &= {zoomed}
     return blue, t
 
 def selected_outline_yellow(att_on, highlight, sel_name, recs):
     """True when the selected session is the zoomed window and latched in attention: its blue outline is
     hidden and the yellow attention outline is drawn at the zoom rect instead (back to blue when the latch clears)."""
-    return bool(highlight and sel_name and sel_name in att_on and recs.get(sel_name, {}).get("zoom"))
+    return bool(highlight and sel_name and sel_name in blocked_names(att_on) and recs.get(sel_name, {}).get("zoom"))
 
 class AttentionOutlines:
     """Yellow outlines around every session needing attention, all drawn by ONE herd-outline helper in
@@ -1447,6 +1446,7 @@ def manager():
             curses.init_pair(4, curses.COLOR_WHITE, SEL_BG)                 # selected row: white on slate blue
             curses.init_pair(7, curses.COLOR_GREEN, SEL_BG)                 # its dot stays green
             curses.init_pair(8, curses.COLOR_YELLOW, SEL_BG)                # attention flash on the selection
+            curses.init_pair(9, curses.COLOR_BLACK, DONE_256 if curses.COLORS >= 256 else curses.COLOR_CYAN)   # done row: dark on teal
             curses.init_pair(5, curses.COLOR_RED, -1); curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
@@ -1508,7 +1508,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.13")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.14")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1647,12 +1647,14 @@ def manager():
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
-                hl = cfg_hl and r["name"] in att_on                       # steady highlight, no blinking
-                if hl:                                                    # whole row, dot to full width: dark on yellow
+                st_ = str(att_on.get(r["name"]) or "").split(":")[0] if cfg_hl else ""
+                if st_ == "blocked":                                      # blocked wins over selection                                                    # whole row, dot to full width: dark on yellow
                     put(y, 0, (line + sub).ljust(W - 1), C(3) | curses.A_BOLD | curses.A_REVERSE)
                 elif idx == sel:
                     put(y, 0, (line + sub).ljust(W - 1), attr)
                     put(y, 1, mark, C(7) | curses.A_BOLD)   # own pair on the selection bg
+                elif st_ == "done":                                       # whole row, dot to full width: dark on teal
+                    put(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD)
                 else:
                     put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
             py = H - 1                                   # the one bottom line

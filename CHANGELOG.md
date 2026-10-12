@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.14 - 2026-10-12
+
+### Changed
+- New colour scheme. Window outlines come in only two kinds: yellow (`attention_outline_rgb`, 255 200 0) for sessions herdr reports **blocked**, and blue (0 95 175) for the selected window (or the zoomed window, shown after zoom as before). Blocked overrides blue, so a blocked selected or zoomed window is yellow. The zoomed window always has exactly one outline, blue or yellow. done, working and idle windows get no outline unless they are the blue target. The yellow outline for **done** is gone.
+- Manager rows: blocked = full-width dark-on-yellow highlight, dot included (wins over the selection). Selected = blue. done = full-width dark-on-teal highlight (new key `done_color_256`, default 37 = #00afaf); the selected row wins over teal. Idle and working rows are unchanged.
+- `attention_highlight` stays the master switch: off = no yellow and no teal, only the blue selection/zoom outline.
+- New `blocked_names()` helper; `desired_outlines()` uses it, and `attention_outline_targets()` now delegates to it. Config `_doc` texts updated.
+
 ## 0.6.13 - 2026-10-12
 
 ### Changed
