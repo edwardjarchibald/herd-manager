@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.7 - 2026-10-12
+
+### Changed
+- A session needing attention now has its **entire row** (dot, name, cwd, padding to full width) drawn dark-on-yellow, including when it is the selected row. `attention_highlight` / `attention_flash` unchanged.
+
 ## 0.6.6 - 2026-10-12
 
 ### Changed
