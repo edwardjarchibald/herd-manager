@@ -6,7 +6,10 @@
 // rects, no window tracking or polling. One line per update, replacing everything drawn:
 //   "<wid> <left> <top> <right> <bottom>|<wid> ...|..."   (wid = CGWindowID of the window to sit above)
 //   "hide"                                                 remove all rings
-// Panels are re-ordered above their windows only on a new line or when the frontmost app changes.
+// A wid prefixed with "+" (the zoomed window) is "topmost": while Terminal is the frontmost app its ring sits at
+// floating level, because clicking/raising a window inside Terminal posts no app-activation event and would
+// otherwise cover a normal-level ring ordered above it (0.6.12). Other rings, and all rings while another app is
+// frontmost, stay at normal level ordered directly above their window. Re-checked on a new line or app switch.
 // Exits when stdin closes (the herd manager quit). Needs no Accessibility permission.
 // It hides itself when no on-screen Terminal window matches the rectangle (other Space, minimized,
 // covered by fullscreen), checked via CGWindowList bounds (no window titles/screen content).
@@ -40,6 +43,8 @@ app.setActivationPolicy(.accessory)
 if CommandLine.arguments.contains("--static") {
     var panels: [NSPanel] = []
     var wids: [Int] = []
+    var tops: [Bool] = []
+    func terminalFront() -> Bool { NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.Terminal" }
     func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false; p.ignoresMouseEvents = true
@@ -47,19 +52,28 @@ if CommandLine.arguments.contains("--static") {
         p.contentView = BorderView()
         return p
     }
-    func reorder() { for (p, w) in zip(panels, wids) { p.order(.above, relativeTo: w) } }
+    func reorder() {
+        let tf = terminalFront()
+        for (i, (p, w)) in zip(panels, wids).enumerated() {
+            let lvl: NSWindow.Level = (tf && i < tops.count && tops[i]) ? .floating : .normal
+            if p.level != lvl { p.level = lvl }
+            if lvl == .floating { p.orderFrontRegardless() } else { p.order(.above, relativeTo: w) }
+        }
+    }
     func apply(_ line: String) {
         guard let main = NSScreen.screens.first else { return }
         var rects: [(Int, CGRect)] = []
+        var newTops: [Bool] = []
         if line != "hide" {
             for ent in line.split(separator: "|") {
-                let v = ent.split(separator: " ").compactMap { Double($0) }
-                if v.count == 5 { rects.append((Int(v[0]), CGRect(x: v[1], y: v[2], width: v[3] - v[1], height: v[4] - v[2]))) }
+                let top = ent.hasPrefix("+")
+                let v = ent.drop(while: { $0 == "+" }).split(separator: " ").compactMap { Double($0) }
+                if v.count == 5 { rects.append((Int(v[0]), CGRect(x: v[1], y: v[2], width: v[3] - v[1], height: v[4] - v[2]))); newTops.append(top) }
             }
         }
         while panels.count < rects.count { panels.append(makePanel()) }
         for (i, p) in panels.enumerated() where i >= rects.count { p.orderOut(nil) }
-        wids = rects.map { $0.0 }
+        wids = rects.map { $0.0 }; tops = newTops
         for (i, (_, r)) in rects.enumerated() {
             let frame = NSRect(x: r.minX - border, y: main.frame.height - r.maxY - border, width: r.width + 2 * border, height: r.height + 2 * border)
             if panels[i].frame != frame { panels[i].setFrame(frame, display: true); panels[i].contentView?.needsDisplay = true }

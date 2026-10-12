@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.12 - 2026-10-12
+
+### Fixed
+- The zoomed window's outline (blue or yellow) kept vanishing and coming back. Root cause: not the manager. outline.log shows no hide/show sent at those moments, no self-check lines, and the helper pids (31551/31552) never changed. A CGWindowList watch (window order sampled every 250 ms) showed Terminal window 1618 rising above the ring while Terminal stayed frontmost, with no manager send. At 19:01:09.333 the blue ring was covered until 19:01:26.017, and at 19:02:38.856 the yellow ring was covered until 19:02:48.594. The `--static` helper kept its rings at `.normal` level, ordered above the window id, and re-ordered them only on a new line or on `didActivateApplication`. Clicking or raising a window inside Terminal is not an app switch, so Terminal put the window above the ring and nothing put the ring back.
+
+- ee-1207 stayed latched yellow after Edward had answered it. focus.log: `19:02:28 attention CLEAR ee-1207 (window focused)`, then `19:02:31 attention SET ee-1207 (done:316)` re-latched it while its window was already in front. The latch clears only when the Terminal front window *changes*, and typing into or clicking a window that is already in front is not a change, so nothing could clear it.
+- The latch now also clears automatically when herdr reports the agent as `working` again (logged as `attention CLEAR <name> (agent working)`).
+- The self-check now strips the new `+` prefix before comparing wids.
+
+### Changed
+- The manager marks the zoomed window's entry with a `+` prefix on the wid (blue and yellow helpers). While Terminal is frontmost, the static helper keeps that ring at floating level, so a raise inside Terminal can't cover it. When another app is frontmost, it drops back to normal level directly above the window, so other apps' windows still cover it. Tile rings are unchanged. Nothing is polled.
+
 ## 0.6.11 - 2026-10-12
 
 ### Fixed

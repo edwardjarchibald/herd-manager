@@ -1093,7 +1093,7 @@ class Outline:
         if force: raise_behind_manager(r["wid"])
         fr = layout_frames().get(name)
         if fr:                                                       # herd placed it: no window lookup
-            self.fails = 0; self._send(f"{int(r['wid'])} " + " ".join(str(round(v)) for v in fr)); return
+            self.fails = 0; self._send(f"{'+' if r.get('zoom') else ''}{int(r['wid'])} " + " ".join(str(round(v)) for v in fr)); return
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
@@ -1164,7 +1164,7 @@ class AttentionOutlines:
         if self.p and self.p.poll() is not None: self._start()      # helper died: restart, resend
         if not self.p: return
         fr = layout_frames()
-        ents = [f"{int(recs[n]['wid'])} " + " ".join(str(round(v)) for v in fr[n]) for n in sorted(targets) if n in fr and recs.get(n, {}).get("wid")]
+        ents = [f"{'+' if recs[n].get('zoom') else ''}{int(recs[n]['wid'])} " + " ".join(str(round(v)) for v in fr[n]) for n in sorted(targets) if n in fr and recs.get(n, {}).get("wid")]
         line = "|".join(ents) if ents else "hide"
         if line == self.last: return
         _olog(f"[att] send {line}")
@@ -1456,7 +1456,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.11")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.12")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1533,6 +1533,9 @@ def manager():
             # transient status flips; cleared only by an explicit event: selecting the session (arrow/scroll onto it,
             # or clicking its row, also when already selected) or clicking its window to the front. Being selected
             # (or zoomed) does NOT clear or pre-acknowledge attention that starts later.
+            for r_ in rows:                                             # agent went back to working: the user answered
+                if r_["name"] in att_on and r_.get("agent") == "working":
+                    _herd_log(f"attention CLEAR {r_['name']} (agent working)"); att_on.pop(r_["name"])
             for r_ in rows:
                 k_ = r_.get("att")
                 if k_ and k_ != att_ack.get(r_["name"]) and r_["name"] not in att_on:
@@ -1578,7 +1581,7 @@ def manager():
             z_ = next((k for k, r in recs_.items() if k != MGR and r.get("zoom") and r.get("wid")), None)
             if z_ and not suppress_ and not zoom_pending and outline and att_outlines and outline.p and att_outlines.p:
                 zw_ = str(int(recs_[z_]["wid"]))
-                n_ = int(outline.showing() and blue_ == z_) + int(any(e.split(" ")[0] == zw_ for e in (att_outlines.last or "hide").split("|")))
+                n_ = int(outline.showing() and blue_ == z_) + int(any(e.split(" ")[0].lstrip("+") == zw_ for e in (att_outlines.last or "hide").split("|")))
                 if n_ != 1 and time.time() - getattr(outline, "chk_t", 0) >= 2.0:
                     outline.chk_t = time.time()
                     _olog(f"self-check: zoomed {z_} has {n_} outlines (blue={blue_} last={outline.last!r} att={att_outlines.last!r}); resyncing")
