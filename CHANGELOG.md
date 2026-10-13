@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.17 - 2026-10-13
+
+### Added
+- N selects the new session and zooms its window automatically, once the window exists and has settled (0.5 s), with the same zoom as `zoom_on_select` (one zoomed window, zoom before outline, blue outline, scrim). New config key `zoom_on_new` (default true); with it off, N still selects the new session.
+
 ## 0.6.16 - 2026-10-12
 
 ### Changed

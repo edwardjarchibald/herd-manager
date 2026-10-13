@@ -41,6 +41,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "zoom_dim":            (0.85,  "HERD_ZOOM_DIM", "opacity 0-1 of the dark scrim over the other terminals while one is zoomed (0 = off)"),
     "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), working = whole row dark-on-orange (selection wins), done/idle = default look, no outline for working/done (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
+    "zoom_on_new":         (True,  None, "N: select the new session and zoom its window once it exists and has settled (same zoom as zoom_on_select)"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
     "min_cell_width":      (360,   None, "dock mode: narrowest terminal cell (px) before the grid adds a row instead of a column"),
@@ -1506,7 +1507,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.16")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.17")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
@@ -1527,6 +1528,7 @@ def manager():
         if not os.environ.get("HERD_TEST_SANDBOX"): _focus_watch()
         hev = HerdrEvents(); last_rl = [time.time()]
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
+        nz = {"name": None, "t": 0.0, "seen": 0.0}                     # N: select + zoom the new session's window
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
@@ -1598,6 +1600,20 @@ def manager():
                 for r_ in rows:
                     if recs_.get(r_["name"], {}).get("wid") == fw_:
                         if r_.get("att"): att_ack[r_["name"]] = r_["att"]
+            if nz["name"]:                                              # N: wait for the new window, then select + zoom
+                idx_ = next((i for i, r in enumerate(rows) if r["name"] == nz["name"]), None)
+                rec_ = _locked(lambda d: d.get(nz["name"])) if idx_ is not None and rows[idx_]["window"] else None
+                if idx_ is not None and sel != idx_: sel = idx_; sel_ev[1] = nz["name"]
+                if rec_ and rec_.get("wid"):
+                    if not nz["seen"]: nz["seen"] = time.time()
+                    elif time.time() - nz["seen"] >= 0.5:               # let the window settle before zooming
+                        nm_ = nz["name"]; nz["name"] = None
+                        if cfg("zoom_on_new") and not hidden[0] and not gf["behind"]:
+                            try:
+                                if zoom_to(nm_, outline): sel_seen[0] = nm_; last = 0
+                            except Exception as e: msg = f"! {e}"
+                        zs.update(name=nm_, since=time.time(), done=True, will=False); zs["scrim"] = True
+                elif time.time() - nz["t"] > 15: nz["name"] = None       # window never showed up: give up
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
                 if nm_ != zs["name"]:
@@ -1785,6 +1801,7 @@ def manager():
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
+                    if n: nz.update(name=n, t=time.time(), seen=0.0)
                 elif ch == "F":
                     msg = group_focus(gf)
                     gf["behind"] = not gf["on"]; gf["t"] = time.time()
