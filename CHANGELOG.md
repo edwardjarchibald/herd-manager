@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.18 - 2026-10-13
+
+### Added
+- Blocked chime: one soft, quiet chime when a session transitions INTO herdr's `blocked` state (not done/idle/working). One chime per transition; no repeats while it stays blocked. Sessions already blocked at manager start, reload, or event reconnect/resync stay silent (1.5 s quiet baseline after each (re)subscribe). Blocks within ~1 s share one chime. Played asynchronously via `afplay -v <volume>` (reaped on a daemon thread), so the UI never waits and the system volume is never touched.
+- Custom sound `assets/chime.wav`, rendered by `assets/chime.py` (pure stdlib): a two-note glass bell, E6 then B6 (rising fifth), additive sine partials with slightly inharmonic overtones, 6 ms soft attack, ~2 s exponential decay, stereo detune shimmer and a light diffuse tail, click-free fade, peak -18 dBFS.
+- New config keys: `chime_on_blocked` (true), `chime_sound` (repo `assets/chime.wav`), `chime_volume` (0.15).
+
 ## 0.6.17 - 2026-10-13
 
 ### Added
