@@ -42,6 +42,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), working = whole row dark-on-orange (selection wins), done/idle = default look, no outline for working/done (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_on_new":         (True,  None, "N: select the new session and zoom its window once it exists and has settled (same zoom as zoom_on_select)"),
+    "focus_on_zoom":       (True,  None, "after any zoom (N, select-zoom after its 250 ms debounce, Z on) activate Terminal and make the zoomed herd window key so it takes keystrokes; click the manager to navigate again"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
     "min_cell_width":      (360,   None, "dock mode: narrowest terminal cell (px) before the grid adds a row instead of a column"),
@@ -1364,11 +1365,12 @@ def zoom(name):
     return "off" if was else "on"
 
 def mgr_zoom(cur, outline=None):
-    """Manager Z key handler. Never changes the frontmost app."""
+    """Manager Z key handler. Zoom on -> post_zoom (focus_on_zoom); zoom off keeps the front app."""
     with keep_front():
         z = zoom(cur)
-        refocus_manager()
-        if outline and z: outline.follow(cur, force=True)
+        if z != "on": refocus_manager()
+        if outline and z == "off": outline.follow(cur, force=True)
+    if z == "on": post_zoom(cur, outline, "Z")
     return f"{cur}: not attached" if z is None else f"zoom {z}: {cur}"
 
 JXA_ACT_KEY = """ObjC.import('AppKit');
@@ -1391,15 +1393,38 @@ def dock_raise():
     subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, term], capture_output=True)
     _herd_log(f"dock_raise pid={d['pid']}")
 
-def zoom_to(name, outline=None):
-    """Auto-zoom on select: make `name` the (only) zoomed window, if it has one. Never changes the
-    frontmost app. Returns True if something changed."""
+def focus_zoomed(name, reason):
+    """0.6.22: make the zoomed herd window (recorded wid only) Terminal's key/main window and Terminal
+    frontmost, so the session prompt takes keystrokes. Types nothing. Logged with reason."""
+    r = recorded(name)
+    if not r or not r.get("zoom") or not r.get("wid"): _herd_log(f"focus_on_zoom skip {name} ({reason}): no zoomed herd window"); return False
+    wid = int(r["wid"])
+    p = subprocess.run(["osascript", "-e", f'''tell application "Terminal"
+  set index of window id {wid} to 1
+  activate
+  set frontmost of window id {wid} to true
+  return id of front window
+end tell'''], capture_output=True, text=True)
+    fw = p.stdout.strip()
+    _herd_log(f"focus_on_zoom {name} wid={wid} reason={reason} front_wid={fw or '?'}{' OK' if fw == str(wid) else ' MISMATCH ' + p.stderr.strip()[:120]}")
+    return fw == str(wid)
+
+def post_zoom(name, outline, reason):
+    """Single post-zoom step for every zoom path: focus (if focus_on_zoom) THEN outline; the scrim
+    re-orders itself below the zoomed window on the resulting app activation."""
+    if cfg("focus_on_zoom"): focus_zoomed(name, reason)
+    else:
+        with keep_front(): refocus_manager()
+    if outline: outline.follow(name, force=True)
+
+def zoom_to(name, outline=None, reason="select"):
+    """Make `name` the (only) zoomed window, if it has one, then post_zoom (focus + outline).
+    Returns True if something changed."""
     r = recorded(name)
     if not r or r.get("zoom"): return False
     with keep_front():
         zoom(name)                      # unzooms any other, zooms this one, retiles
-        refocus_manager()
-        if outline: outline.follow(name, force=True)
+    post_zoom(name, outline, reason)
     return True
 
 def raise_behind_manager(wid):
@@ -1635,7 +1660,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.21 (event-woken loop)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.22 (event-woken loop, focus_on_zoom)")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
         fw_hit = set()
@@ -1762,7 +1787,7 @@ def manager():
                         nm_ = nz["name"]; nz["name"] = None
                         if cfg("zoom_on_new") and not hidden[0] and not gf["behind"]:
                             try:
-                                if zoom_to(nm_, outline): sel_seen[0] = nm_; last = 0
+                                if zoom_to(nm_, outline, "new"): sel_seen[0] = nm_; last = 0
                             except Exception as e: msg = f"! {e}"
                         zs.update(name=nm_, since=time.time(), done=True, will=False); zs["scrim"] = True
                 elif time.time() - nz["t"] > 15: nz["name"] = None       # window never showed up: give up
@@ -1776,7 +1801,7 @@ def manager():
                     zs["done"] = True
                     if rows[sel]["window"]:
                         try:
-                            if zoom_to(nm_, outline): sel_seen[0] = nm_; last = 0      # outline already at the zoomed frame
+                            if zoom_to(nm_, outline, "select-debounced"): sel_seen[0] = nm_; last = 0      # outline already at the zoomed frame
                         except Exception as e: msg = f"! {e}"
                     zoom_pending = False; zs["scrim"] = True
             if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None or zs.pop("scrim", False))

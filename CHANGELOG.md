@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.22 - 2026-10-14
+
+### Added
+- `focus_on_zoom` (config.json, default true): after every zoom, a single post-zoom step (`post_zoom`, used by `zoom_to` and Z) raises the zoomed herd window (recorded wid only) to index 1, activates Terminal and makes that window frontmost, so the session prompt is key and takes keystrokes. Nothing is typed. Order: zoom -> focus -> blue outline; the scrim re-orders below the zoomed window on the resulting app activation.
+- Paths: N (`reason=new`, after the 0.5 s settle), select-zoom (`reason=select-debounced`, only after the 250 ms debounce settles, never on intermediate arrow steps), Z when it turns zoom on (`reason=Z`; Z off still keeps the front app and the manager on top).
+- focus.log: `focus_on_zoom <session> wid=<wid> reason=<reason> front_wid=<id> OK|MISMATCH`.
+
+### Note
+- With focus_on_zoom on, a settled select-zoom moves keyboard focus to the zoomed session; click the manager window (or Cmd-` back to it) to continue list navigation. Set `focus_on_zoom: false` for the old behaviour (manager keeps focus).
+
 ## 0.6.21 - 2026-10-14
 
 ### Changed
