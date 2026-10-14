@@ -542,10 +542,12 @@ def _zoom_rect(term_area):
     l, t = round(x + (w - zw) / 2), round(y + (h - zh) / 2)
     return (l, t, l + zw, t + zh)
 
-_frames_cache = [None, {}]
+_frames_cache = [None, {}, False]     # [mtime, frames, watched]: watched = the manager's kqueue invalidates it (0.6.21)
 def layout_frames():
     """{record key: [l, t, r, b]} as last computed by tile() (any herd process), from layout.json.
-    Re-read only when the file's mtime changes (a stat, no window lookup)."""
+    Re-read only when the file's mtime changes (a stat, no window lookup). In the manager (watched) not even
+    the stat: the kqueue FileWatch and this process's own tile() reset the cache."""
+    if _frames_cache[2] and _frames_cache[0] is not None: return _frames_cache[1]
     try: mt = os.stat(LAYOUT).st_mtime_ns
     except OSError: return {}
     if mt != _frames_cache[0]:
@@ -593,6 +595,7 @@ def tile(quiet=False):
         lay["frames"] = fr                   # herd-computed frame per session (tile rect or zoom rect) for the outlines
         tmp = LAYOUT + ".tmp"; json.dump(lay, open(tmp, "w")); os.replace(tmp, LAYOUT)
     except OSError: pass
+    _frames_cache[0] = None                  # own write: don't wait for the kqueue event
     moves = {str(alive[n]["wid"]): r for n, r in zip(same, rects)}
     if has_mgr: moves[str(alive[MGR]["wid"])] = mrect
     if zoomed: moves[str(alive[zoomed]["wid"])] = _zoom_rect(term_area)
@@ -996,11 +999,77 @@ def sessions():
             cmd = prog_label(p)
             if p.get("agent") and p.get("agent_status"): cmd += f" ({p['agent_status']})"
         label = w["label"]
-        rows.append({"name": label, "herd": True,
+        rows.append({"name": label, "herd": True, "pane": p.get("pane_id"), "prog": prog_label(p) if p else "", "is_agent": bool(p.get("agent")),
                      "window": label in recs, "cwd": detail_cwd(p.get("foreground_cwd") or p.get("cwd", "")),
                      "cmd": cmd, "agent": p.get("agent_status", ""),
                      "att": f"{p['agent_status']}:{seq.get(p.get('terminal_id'))}" if p.get("agent") and p.get("agent_status") in ("done", "blocked") else None})
     return rows
+
+class Wake:
+    """Self-pipe (0.6.21): background threads (herdr events, kqueue file watch, scrim app activation) write one
+    byte; the manager loop select()s on stdin + this pipe. No polling timer."""
+    def __init__(self):
+        self.r, self.w = os.pipe()
+        for fd in (self.r, self.w): fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+    def __call__(self):
+        try: os.write(self.w, b"x")
+        except OSError: pass
+    def drain(self):
+        try:
+            while os.read(self.r, 4096): pass
+        except OSError: pass
+WAKE = None
+def _wake():
+    if WAKE: WAKE()
+def _ms(t=None):
+    t = time.time() if t is None else t
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
+
+class FileWatch:
+    """kqueue VNODE watch (0.6.21) instead of stat polling. Editors/git/os.replace swap the inode, so on
+    DELETE/RENAME/REVOKE the watch is re-armed on the path's new file. A path's callback fires only when its
+    content hash changed (windows.json is rewritten unchanged by every _locked()). A missing path is retried
+    every 1 s until it exists (only during a replace gap)."""
+    def __init__(self, paths, cb):
+        import select, threading, hashlib
+        self.paths, self.cb, self.h = list(paths), cb, {}
+        self.ok = hasattr(select, "kqueue")
+        for p in self.paths: self.h[p] = self._hash(p)
+        if self.ok: threading.Thread(target=self._run, daemon=True).start()
+    def _hash(self, p):
+        import hashlib
+        try: return hashlib.sha1(open(p, "rb").read()).hexdigest()
+        except OSError: return None
+    def _run(self):
+        import select
+        try:
+            kq = select.kqueue(); fds = {}
+            GONE = select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME | getattr(select, "KQ_NOTE_REVOKE", 0)
+            F = GONE | select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_ATTRIB
+            def arm(p):
+                try: fd = os.open(p, os.O_RDONLY | (0x8000 if sys.platform == "darwin" else 0))   # O_EVTONLY
+                except OSError: return False
+                fds[fd] = p
+                kq.control([select.kevent(fd, select.KQ_FILTER_VNODE, select.KQ_EV_ADD | select.KQ_EV_CLEAR, F)], 0)
+                return True
+            missing = [p for p in self.paths if not arm(p)]
+            while True:
+                hit = set()
+                for e in kq.control(None, 16, 1.0 if missing else None):
+                    p = fds.get(e.ident)
+                    if p is None: continue
+                    if e.fflags & GONE:
+                        fds.pop(e.ident, None); os.close(e.ident)
+                        if not arm(p): missing.append(p)
+                    hit.add(p)
+                for p in list(missing):
+                    if arm(p): missing.remove(p); hit.add(p)
+                for p in hit:
+                    h_ = self._hash(p)
+                    if h_ != self.h.get(p): self.h[p] = h_; self.cb(p)
+        except Exception as e:
+            self.ok = False; _herd_log(f"file watch: failed ({e}); falling back to stat")
+            _wake()
 
 class HerdrEvents:
     """herdr state changes pushed over its API socket (events.subscribe) instead of polling (0.6.13).
@@ -1014,11 +1083,28 @@ class HerdrEvents:
     RESUB = {"pane_created", "pane_closed", "pane_exited", "pane.created", "pane.closed", "pane.exited"}
     def __init__(self):
         import threading
+        import collections
         self.dirty = threading.Event(); self.dirty.set(); self.up = False; self.n = 0; self.err = ""; self.epoch = 0
+        self.lock = threading.Lock(); self.status = collections.deque(); self.t_ev = None
         threading.Thread(target=self._run, daemon=True).start()
     def take(self):
+        """Structural change (or (re)connect) pending: the UI takes one full sessions() snapshot."""
         if self.dirty.is_set(): self.dirty.clear(); return True
         return False
+    def take_status(self):
+        """pane.agent_status_changed events since the last call: [(pane_id, status, seq or None, t)] (0.6.21)."""
+        with self.lock:
+            out = list(self.status); self.status.clear()
+        return out
+    def take_t(self):
+        """Receive time of the oldest event not yet rendered (for the event->refresh latency log)."""
+        with self.lock:
+            t, self.t_ev = self.t_ev, None
+        return t
+    def _mark(self, t):
+        with self.lock:
+            if self.t_ev is None: self.t_ev = t
+        _wake()
     def _sock_path(self):
         try: return subprocess.run(["herdr", "status", "server"], capture_output=True, text=True, timeout=3).stdout.split("socket:")[1].split()[0]
         except Exception: return os.path.expanduser("~/.config/herdr/herdr.sock")
@@ -1034,17 +1120,21 @@ class HerdrEvents:
                 f = sk.makefile("r", encoding="utf-8")
                 first = json.loads(f.readline() or "{}")
                 if "error" in first or not first: raise RuntimeError(f"subscribe failed: {first.get('error') or 'EOF'}")
-                self.up = True; back = 1.0; self.epoch += 1; self.dirty.set()                 # (re)connected: one resync
+                self.up = True; back = 1.0; self.epoch += 1; self.dirty.set(); self._mark(time.time())   # (re)connected: one resync
                 _herd_log(f"herdr events: subscribed ({len(subs)} subscriptions)")
                 resub = False
                 for line in f:
                     try: ev = json.loads(line)
                     except ValueError: continue
-                    self.n += 1; self.dirty.set()
+                    self.n += 1; now = time.time()
                     d = ev.get("data") if isinstance(ev.get("data"), dict) else ev
                     kind = d.get("type") or ev.get("event") or ev.get("type") or "?"
                     if kind in ("pane_agent_status_changed", "pane.agent_status_changed"):
                         _herd_log(f"herdr event: {d.get('pane_id')} -> {d.get('agent_status')}")
+                        seq = d.get("state_change_seq", ev.get("state_change_seq"))
+                        with self.lock: self.status.append((d.get("pane_id"), d.get("agent_status") or "", seq, now))
+                    else: self.dirty.set()                                                      # structural: full snapshot
+                    self._mark(now)
                     if kind in self.RESUB: resub = True; break
                 sk.close(); self.up = False
                 if resub: _herd_log(f"herdr events: {kind}, re-subscribing"); continue
@@ -1079,7 +1169,7 @@ class Scrim:
     """Zoom scrim (helper/herd-scrim.swift): dark overlay over the terminal area, ordered directly below
     the zoomed window (so above the other herd terminals). Hidden when nothing is zoomed."""
     def __init__(self):
-        self.p = None; self.last = None; self.t = 0.0; self.why = "start"; self.apid = [None, 0]
+        self.p = None; self.last = None; self.t = 0.0; self.why = "start"; self.apid = [None, 0]; self.act = None; self.rate = 0.0 if WAKE else 1.0
         src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-scrim.swift")
         binp = os.path.expanduser("~/.cache/herd/herd-scrim")
         try:
@@ -1087,8 +1177,18 @@ class Scrim:
             if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
                 os.makedirs(os.path.dirname(binp), exist_ok=True)
                 if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return
-            self.p = subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+            self.p = subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            __import__("threading").Thread(target=self._read, args=(self.p,), daemon=True).start()
         except (OSError, subprocess.SubprocessError): self.p = None
+    def _read(self, p):
+        """helper stdout: `activated <pid>` per NSWorkspace app activation (0.6.21) -> wakes the manager loop."""
+        try:
+            for line in p.stdout:
+                if line.startswith("activated "): self.act = line.split()[1]; _wake()
+        except (OSError, ValueError, IndexError): pass
+    def take_act(self):
+        a, self.act = self.act, None
+        return a
     def _send(self, line):
         if self.p and self.p.poll() is not None: self.__init__()
         if not self.p or line == self.last: return
@@ -1096,7 +1196,7 @@ class Scrim:
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def update(self, suppress=False, force=False):
-        if not force and time.time() - self.t < 1.0: return
+        if not force and time.time() - self.t < self.rate: return    # manager loop is event-woken (0.6.21): rate 0
         self.t = time.time()
         z = None if suppress else next((k for k, r in _locked(lambda d: dict(d)).items() if k != MGR and r.get("zoom")), None)
         dim = config()["zoom_dim"]
@@ -1130,7 +1230,7 @@ class Outline:
     (helper/herd-outline.swift, compiled on first use into ~/.cache/herd). Click-through and
     non-activating; it exits when this pipe closes (manager quit/reload)."""
     def __init__(self, rgb=None, tag="sel"):
-        self.p = None; self.last = None; self.t = 0.0; self.rgb = rgb; self.tag = tag
+        self.p = None; self.last = None; self.t = 0.0; self.rgb = rgb; self.tag = tag; self.pend = 0.0; self.rate = 0.0 if WAKE else 1.0
         src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-outline.swift")
         binp = os.path.expanduser("~/.cache/herd/herd-outline")
         try:
@@ -1162,14 +1262,16 @@ class Outline:
         or zoom rect; no window lookup), or hide if it has no window. Only a window without a computed
         frame (e.g. on another display) falls back to its live Terminal bounds (~1/s)."""
         if not self.alive(): return
-        if not force and time.time() - self.t < 1.0: return
-        self.t = time.time()
+        if not force and time.time() - self.t < self.rate: return    # manager loop is event-woken (0.6.21): rate 0
+        self.t = time.time(); self.pend = 0.0
         r = _locked(lambda d: d.get(name)) if name else None
         if not r: self._send("hide"); return
         if force: raise_behind_manager(r["wid"])
         fr = layout_frames().get(name)
         if fr:                                                       # herd placed it: no window lookup
             self.fails = 0; self._send(f"{'+' if r.get('zoom') else ''}{int(r['wid'])} " + " ".join(str(round(v)) for v in fr)); return
+        if time.time() - getattr(self, "bt", 0.0) < 1.0: self.pend = self.bt + 1.0; return   # window lookup stays <= 1/s; loop retries then
+        self.bt = time.time()
         q = subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then get bounds of window id {int(r["wid"])}'],
                            capture_output=True, text=True)
         b = [x.strip() for x in q.stdout.split(",")]
@@ -1455,7 +1557,10 @@ def manager():
         for sg in (signal.SIGHUP, signal.SIGTERM): signal.signal(sg, on_sig)
 
     def ui(scr):
-        curses.curs_set(0); scr.timeout(250); curses.use_default_colors(); curses.raw()
+        global WAKE
+        curses.curs_set(0); scr.timeout(0); curses.use_default_colors(); curses.raw()   # 0.6.21: non-blocking getch; select() waits
+        WAKE = Wake(); resized = [False]; drawn = [None]
+        signal.signal(signal.SIGWINCH, lambda *_: (resized.__setitem__(0, True), _wake()))
         # Mouse: ncurses enables xterm mode 1000 (X10 encoding), which Terminal.app sends with
         # TERM=xterm-256color. mouseinterval(0) = no click-resolution delay.
         # Wheel up = BUTTON4_PRESSED; on this
@@ -1525,14 +1630,19 @@ def manager():
                         for _ in range(3): scr.getch()                   # raw X10 mouse: swallow
                         return None
                     if 0x40 <= c <= 0x7e: break                          # final byte
-            finally: scr.timeout(250)
+            finally: scr.timeout(0)
             body = "".join(chr(c) for c in seq[1:] if 0 <= c < 256)
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.20")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.21 (event-woken loop)")
         att_on = {}                                                    # session -> latched attention key
-        hev = HerdrEvents(); last_rl = [time.time()]
+        hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
+        fw_hit = set()
+        def on_file(p): fw_hit.add(p); _wake()
+        fw = FileWatch([me, LAYOUT, WINFILE], on_file)
+        _frames_cache[2] = fw.ok
+        _herd_log(f"loop: select on stdin+wake pipe; file watch {'kqueue' if fw.ok else 'unavailable (stat fallback)'}")
         chime_st = {"epoch": -1, "quiet": 0.0, "blk": set(), "t": 0.0}   # blocked-chime state (see attention block)
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
         nz = {"name": None, "t": 0.0, "seen": 0.0}                     # N: select + zoom the new session's window
@@ -1562,10 +1672,27 @@ def manager():
             put(H - 1, 0, " " * (W - 1)); put(H - 1, 0, q, C(3) | curses.A_BOLD)
             try: v = scr.getstr(H - 1, min(len(q), W - 2), 40).decode().strip()
             except Exception: v = ""
-            curses.noecho(); curses.curs_set(0); scr.timeout(250); return v
+            curses.noecho(); curses.curs_set(0); scr.timeout(0); drawn[0] = None; return v
         while True:
-            if time.time() - last_rl[0] > 2: last_rl[0] = time.time(); maybe_reload()   # own-file mtime stat only
-            if last == 0 or hev.take():                                 # herdr pushed a change (or local action)
+            hits_ = set(fw_hit); fw_hit.difference_update(hits_)
+            if not fw.ok and time.time() - last_rl[0] > 2: last_rl[0] = time.time(); maybe_reload(); _frames_cache[2] = False   # no kqueue: old stat
+            if me in hits_: maybe_reload()                              # kqueue: own file replaced/written
+            if LAYOUT in hits_:
+                _frames_cache[0] = None                                # frames changed (any herd process): outlines/scrim re-send
+                if outline: outline.t = 0.0
+                if scrim: scrim.t = 0.0
+            if WINFILE in hits_ and rows:                               # window opened/closed by another herd process
+                recs_w = _locked(lambda d: dict(d))
+                for r_ in rows: r_["window"] = r_["name"] in recs_w
+                if outline: outline.t = 0.0
+                if scrim: scrim.t = 0.0
+            if resized[0]:
+                resized[0] = False
+                try: sz_ = os.get_terminal_size(0); curses.resizeterm(sz_.lines, sz_.columns)
+                except (OSError, curses.error): pass
+                drawn[0] = None
+            if last == 0 or hev.take():                                 # structural herdr change, (re)connect, or local action
+                hev.take_status()                                       # superseded by this snapshot
                 try:
                     rows = sessions()
                     if want_sel[0]:
@@ -1573,16 +1700,37 @@ def manager():
                 except SystemExit as e: msg = f"! {e}"
                 except Exception as e: msg = f"! {e}"
                 last = time.time()
+            for pid_, st_, seq_, t_ in hev.take_status():               # agent status: patch the cached row in place (0.6.21)
+                r_ = next((r for r in rows if r.get("pane") and r.get("pane") == pid_), None)
+                if r_ is None: hev.dirty.set(); _wake(); continue       # unknown pane: one full snapshot instead
+                old_ = r_.get("agent", ""); r_["agent"] = st_; r_["is_agent"] = r_.get("is_agent") or bool(st_)
+                r_["cmd"] = r_.get("prog", "") + (f" ({st_})" if st_ else "")
+                if st_ in ("done", "blocked"):
+                    if seq_ is not None: r_["att"] = f"{st_}:{seq_}"
+                    elif old_ != st_ or not r_.get("att"): att_seq[0] += 1; r_["att"] = f"{st_}:L{att_seq[0]}"   # local seq: new done/blocked event
+                else: r_["att"] = None
+                _herd_log(f"status applied {_ms(t_)} {r_['name']} {pid_}: {old_ or '-'} -> {st_} att={r_['att']} (+{(time.time() - t_) * 1000:.0f} ms)")
             sel = max(0, min(sel, len(rows) - 1))
-            if not gf["on"] and time.time() - gf["pt"] > 1.0:          # track last non-Terminal frontmost app
-                gf["pt"] = time.time(); fp = frontmost_pid()
-                if fp and fp != gf.setdefault("term", _terminal_pid()):
-                    st = apps_above_terminal()
-                    if st: gf["stack"] = st
-            if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
-                gf["t"] = time.time()
-                if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
-            if hidden[0] and time.time() - gf.get("ht", 0) > 1.0:      # stale hide flag: windows shown again?
+            act_ = scrim.take_act() if scrim else None
+            act_ev = bool(scrim and scrim.p)                             # helper forwards NSWorkspace activations
+            if act_ev:                                                  # event-driven (0.6.21): only on app activation
+                if act_ is not None:
+                    term_ = gf.setdefault("term", _terminal_pid())
+                    if not gf["on"] and act_ != term_:                  # track last non-Terminal frontmost app
+                        st = apps_above_terminal()
+                        if st: gf["stack"] = st
+                    if gf["behind"] and act_ == term_: gf["behind"] = False; sel_seen[0] = None   # user clicked back into Terminal
+                    if hidden[0]: gf["ht"] = 0.0
+            else:                                                       # no scrim helper: old 1 s checks
+                if not gf["on"] and time.time() - gf["pt"] > 1.0:          # track last non-Terminal frontmost app
+                    gf["pt"] = time.time(); fp = frontmost_pid()
+                    if fp and fp != gf.setdefault("term", _terminal_pid()):
+                        st = apps_above_terminal()
+                        if st: gf["stack"] = st
+                if gf["behind"] and time.time() - gf["t"] > 1.0:          # user clicked back into Terminal?
+                    gf["t"] = time.time()
+                    if frontmost_pid() == _terminal_pid(): gf["behind"] = False; sel_seen[0] = None
+            if hidden[0] and ((act_ev and gf.get("ht", 1) == 0.0) or (not act_ev and time.time() - gf.get("ht", 0) > 1.0)):      # stale hide flag: windows shown again?
                 gf["ht"] = time.time()
                 rs_ = [r_ for k_, r_ in _locked(lambda d: dict(d)).items() if k_ != MGR]
                 if rs_ and subprocess.run(["osascript", "-e", f'tell application "Terminal" to get visible of window id {int(rs_[0]["wid"])}'],
@@ -1635,6 +1783,7 @@ def manager():
             recs_ = _locked(lambda d: dict(d))
             suppress_ = gf["behind"] or hidden[0]
             blue_, yellow_ = desired_outlines(att_on, cfg("attention_highlight"), rows[sel]["name"] if rows else None, recs_, suppress_)
+            if outline: outline.pend = 0.0                             # only a skipped window lookup below re-arms the retry
             if outline and (suppress_ or not blue_): outline._send("hide"); sel_seen[0] = None
             elif outline and zoom_pending and blue_ == (rows[sel]["name"] if rows else None):
                 outline._send("hide")                                  # no outline at the tiled spot; zoom_to() shows it zoomed
@@ -1653,7 +1802,8 @@ def manager():
                     if blue_: outline.follow(blue_, force=True)
                     else: outline._send("hide")
                     att_outlines.update(yellow_, recs_)
-            scr.erase(); H, W = scr.getmaxyx()
+            frame = []; H, W = scr.getmaxyx()                 # 0.6.21: build the frame, draw only if it changed
+            fput = lambda y, x, t, a=0: frame.append((y, x, t, a))
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel
             if sel >= top + list_h: top = sel - list_h + 1
@@ -1667,40 +1817,61 @@ def manager():
                 sub = sub[:max(0, W - 1 - len(line))]
                 st_ = str(att_on.get(r["name"]) or "").split(":")[0] if cfg_hl else ""
                 if st_ == "blocked":                                      # blocked wins over selection                                                    # whole row, dot to full width: dark on yellow
-                    put(y, 0, (line + sub).ljust(W - 1), C(3) | curses.A_BOLD | curses.A_REVERSE)
+                    fput(y, 0, (line + sub).ljust(W - 1), C(3) | curses.A_BOLD | curses.A_REVERSE)
                 elif idx == sel:
-                    put(y, 0, (line + sub).ljust(W - 1), attr)
-                    put(y, 1, mark, C(7) | curses.A_BOLD)   # own pair on the selection bg
+                    fput(y, 0, (line + sub).ljust(W - 1), attr)
+                    fput(y, 1, mark, C(7) | curses.A_BOLD)   # own pair on the selection bg
                 elif cfg_hl and r.get("agent") == "working":               # whole row, dot to full width: dark on orange
-                    put(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD)
+                    fput(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD)
                 else:
-                    put(y, 0, line, attr); put(y, len(line), sub, curses.A_DIM)
+                    fput(y, 0, line, attr); fput(y, len(line), sub, curses.A_DIM)
             py = H - 1                                   # the one bottom line
             pfx = " > "
-            put(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
+            fput(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)
             if msg != msg_seen[0]: msg_seen[:] = [msg, time.time()]
             if msg and time.time() - msg_seen[1] > 4: msg = ""          # transient status ~4s
             if bc["focus"]:
                 cue = "(click list to end)"
                 room = W - 1 - len(pfx) - (len(cue) + 1 if W - 1 - len(pfx) > len(cue) + 8 else 0)
-                put(py, 0, pfx, curses.A_BOLD)
-                if room < W - 1 - len(pfx): put(py, W - 1 - len(cue), cue, C(3))
-            elif msg: put(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
-            else: put(py, 0, pfx + "click for broadcast", curses.A_DIM)
+                fput(py, 0, pfx, curses.A_BOLD)
+                if room < W - 1 - len(pfx): fput(py, W - 1 - len(cue), cue, C(3))
+            elif msg: fput(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
+            else: fput(py, 0, pfx + "click for broadcast", curses.A_DIM)
             if show_help[0]:                             # hints overlay: centered box over the list
                 hl = [l for items in HELP for l in wrap_items(items, max(1, W - 5))] + ["", "? / Esc: close"]
                 bw = min(W - 1, max(len(l) for l in hl) + 4); bh = len(hl) + 2
                 bx = max(0, (W - 1 - bw) // 2); by = max(0, (H - 2 - bh) // 2)
-                put(by, bx, "\u250c" + "\u2500" * (bw - 2) + "\u2510", C(1))
+                fput(by, bx, "\u250c" + "\u2500" * (bw - 2) + "\u2510", C(1))
                 for i, l in enumerate(hl):
-                    put(by + 1 + i, bx, "\u2502 " + l.ljust(bw - 4) + " \u2502", C(1) if l and not l.startswith("?") else curses.A_DIM)
-                put(by + bh - 1, bx, "\u2514" + "\u2500" * (bw - 2) + "\u2518", C(1))
-            if bc["focus"]:
-                curses.curs_set(1)
-                try: scr.move(py, len(pfx))
-                except curses.error: pass
-            else: curses.curs_set(0)
-            scr.refresh()
+                    fput(by + 1 + i, bx, "\u2502 " + l.ljust(bw - 4) + " \u2502", C(1) if l and not l.startswith("?") else curses.A_DIM)
+                fput(by + bh - 1, bx, "\u2514" + "\u2500" * (bw - 2) + "\u2518", C(1))
+            sig_ = (H, W, bc["focus"], tuple(frame))
+            t_ev_ = hev.take_t()
+            if sig_ != drawn[0]:
+                t0_ = time.time(); scr.erase()
+                for op_ in frame: put(*op_)
+                if bc["focus"]:
+                    curses.curs_set(1)
+                    try: scr.move(py, len(pfx))
+                    except curses.error: pass
+                else: curses.curs_set(0)
+                scr.refresh(); drawn[0] = sig_
+                if t_ev_: _herd_log(f"redraw {_ms()} event->refresh {(time.time() - t_ev_) * 1000:.0f} ms (draw {(time.time() - t0_) * 1000:.1f} ms)")
+                try:                                                    # diagnostics for `cat ~/.cache/herd/manager-state.json` (on change, not every 2 s)
+                    json.dump({"t": time.strftime("%H:%M:%S"), "selected": rows[sel]["name"] if rows else None, "hidden": hidden[0],
+                               "behind": gf["behind"], "focus_on": gf["on"], "outline_pid": outline.p.pid if outline and outline.p else None,
+                               "outline_last": outline.last if outline else None}, open(os.path.expanduser("~/.cache/herd/manager-state.json"), "w"))
+                except Exception: pass
+            # wake deadlines (0.6.21): select() blocks with no timeout unless one of these is pending
+            now_ = time.time(); dl_ = []
+            if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"] and not zs["done"]: dl_.append(zs["since"] + 0.25)     # select-zoom debounce
+            if nz["name"]: dl_.append(nz["seen"] + 0.5 if nz["seen"] and nz["seen"] + 0.5 > now_ else nz["t"] + 15)            # new-session settle / give up
+            if msg: dl_.append(msg_seen[1] + 4.01)                                                  # status message expiry
+            if outline and outline.pend: dl_.append(outline.pend)                                   # frame-less window: bounds lookup retried at <= 1/s
+            if not act_ev: dl_.append(now_ + 1.0)                                                  # no scrim helper: old 1 s front-app checks
+            if not fw.ok: dl_.append(now_ + 2.0)                                                    # no kqueue: old reload stat
+            if any(n_ for n_ in fw_hit) or hev.dirty.is_set(): dl_.append(now_)
+            wait_ = max(0.0, min(dl_) - now_) if dl_ else None
             if state_file: open(state_file, "w").write(f"{sel} focus={bc['focus']} help={show_help[0]}")
             if os.environ.get("HERD_TEST_KEYLOG"): open(os.environ["HERD_TEST_KEYLOG"], "a").write(f"{k_last[0]}\n")
             if os.environ.get("HERD_TEST_DUMP"):
@@ -1711,8 +1882,9 @@ def manager():
                 # LIVE passthrough: read raw bytes from the tty (curses never sees them), keep mouse
                 # events local, forward everything else unchanged as one batch.
                 import select as _sel
-                r_, _, _ = _sel.select([0], [], [], 0.25)
-                if not r_: continue
+                r_, _, _ = _sel.select([0, WAKE.r], [], [], wait_)
+                if WAKE.r in r_: WAKE.drain()
+                if 0 not in r_: continue
                 data = os.read(0, 4096)
                 while _sel.select([0], [], [], 0.01)[0]:
                     more = os.read(0, 4096)
@@ -1741,14 +1913,13 @@ def manager():
                 if exit_live:
                     bc["focus"] = False; esc_until[0] = time.time() + 0.3; msg = "live broadcast off"
                 continue
-            if time.time() - gf.get("dump", 0) > 2.0:                 # diagnostics for `cat ~/.cache/herd/manager-state.json`
-                gf["dump"] = time.time()
-                try:
-                    json.dump({"t": time.strftime("%H:%M:%S"), "selected": rows[sel]["name"] if rows else None, "hidden": hidden[0],
-                               "behind": gf["behind"], "focus_on": gf["on"], "outline_pid": outline.p.pid if outline and outline.p else None,
-                               "outline_last": outline.last if outline else None}, open(os.path.expanduser("~/.cache/herd/manager-state.json"), "w"))
-                except Exception: pass
-            k = read_key()
+            k = read_key()                                             # non-blocking: drains buffered keys first
+            if k == -1:                                                # nothing buffered: sleep until key / wake byte / deadline
+                import select as _sel
+                try: r_ = _sel.select([0, WAKE.r], [], [], wait_)[0]
+                except InterruptedError: r_ = []
+                if WAKE.r in r_: WAKE.drain()
+                continue
             if k is None: continue
             if k != -1 and gf["behind"]:                               # a key reached the manager: Terminal is front
                 gf["behind"] = False; sel_seen[0] = None

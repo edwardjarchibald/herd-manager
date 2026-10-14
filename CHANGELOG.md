@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.21 - 2026-10-14
+
+### Changed
+- Event-woken manager loop. herdr events, a kqueue file watch and the scrim helper's app-activation lines write one byte to a self-pipe; the loop `select()`s on stdin + that pipe (list mode and live broadcast alike) and has no timer. A timeout is set only while a deadline is pending: select-zoom debounce (0.25 s), new-session zoom settle (0.5 s) / give-up (15 s), status message expiry (4 s), or a 1 s outline/scrim send that was rate-limited (retried once). Keys are read non-blocking after the wake (getch drain; escape sequences unchanged). Terminal resize wakes via SIGWINCH.
+- `pane.agent_status_changed` events patch the cached rows in place (agent status, cmd label, attention key from the event's `state_change_seq`, else a local counter bumped on each new done/blocked). A full `sessions()` snapshot (herdr workspace/pane list, api snapshot, auto names) runs only on structural events (pane/workspace/layout), on (re)connect, after local actions, or for an event from a pane not in the rows. The 1.5 s chime quiet window after (re)subscribe is unchanged.
+- The screen is redrawn only when the built frame differs from the last one (no erase every 250 ms). manager-state.json is written on redraw instead of every 2 s.
+- Self-reload, layout.json and windows.json: kqueue VNODE watch (re-armed when git/editors/os.replace swap the file; content-hash filtered, since `_locked()` rewrites windows.json unchanged) instead of the 2 s self-stat and per-call layout.json stat. windows.json changes by other herd processes update the window dots and let the N zoom find the new window without polling.
+- herd-scrim prints `activated <pid>` on each NSWorkspace app activation; the manager's front-app stack tracking, "clicked back into Terminal" (F behind) check and stale-H check run on that line instead of a 1 s osascript poll (old polling only if the helper is unavailable).
+
+### Added
+- focus.log: `status applied <hh:mm:ss.ms> <session> <pane>: old -> new att=... (+N ms)` per event-applied status change and `redraw <time> event->refresh N ms` per event-triggered redraw.
+
 ## 0.6.20 - 2026-10-14
 
 ### Changed

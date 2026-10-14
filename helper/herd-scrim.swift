@@ -94,7 +94,12 @@ DispatchQueue.global().async {
     DispatchQueue.main.async { exit(0) }
 }
 let wnc = NSWorkspace.shared.notificationCenter
-wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
+// stdout to the manager (0.6.21): one `activated <pid>` line per app activation, so the manager's front-app /
+// behind / hidden checks run on this event instead of a 1 s osascript poll.
+signal(SIGPIPE, SIG_IGN)
+func emit(_ s: String) { if let d = (s + "\n").data(using: .utf8) { _ = d.withUnsafeBytes { write(1, $0.baseAddress, d.count) } } }
+wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
+    if let a = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { emit("activated \(a.processIdentifier)") }
     // Terminal raises its windows just AFTER posting activation: one follow-up re-order (one-shot, not a timer)
     reorder("app activated"); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder("app activated +0.15s") }
 }
