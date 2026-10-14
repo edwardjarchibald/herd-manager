@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.25 - 2026-10-14
+
+### Fixed
+- focus_on_zoom verify logged `still front=pid695/<wid> MISMATCH` after a successful refocus: it decided "Terminal is frontmost" by comparing the frontmost pid with a separate `pgrep -x Terminal` lookup, which did not match inside the manager even though pid 695 is Terminal. It now reads the frontmost app's bundle id and pid in one sample (com.apple.Terminal = Terminal) and still requires Terminal's front window id to equal the recorded zoomed wid, so the manager window (also a Terminal window) in front still counts as lost focus. Refocus remains at most once per verify.
+
 ## 0.6.24 - 2026-10-14
 
 ### Fixed
