@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.23 - 2026-10-14
+
+### Fixed
+- Selecting a session (keyboard select-zoom or mouse click) now always ends with its zoomed window focused:
+  - Re-selecting an already-zoomed session (or one zoomed via Z/N earlier) used to hit `zoom_to()`'s already-zoomed guard and return before `post_zoom()`, so no focus happened (no focus.log line). It now runs `post_zoom()` with `reason=<reason>-already-zoomed`.
+  - Clicking the row that was already selected didn't re-arm the select-zoom (selection unchanged). A click now re-arms it, and the click debounce is 0.4 s so the manager's own click activation settles first.
+  - The immediate `front_wid` check could pass and the manager window could still take key back right after. A background verify (0.35 s later) checks that Terminal is frontmost with the zoomed wid in front, refocuses once if not, and logs `focus_on_zoom verify ...`.
+
 ## 0.6.22 - 2026-10-14
 
 ### Added

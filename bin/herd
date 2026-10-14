@@ -1407,7 +1407,30 @@ def focus_zoomed(name, reason):
 end tell'''], capture_output=True, text=True)
     fw = p.stdout.strip()
     _herd_log(f"focus_on_zoom {name} wid={wid} reason={reason} front_wid={fw or '?'}{' OK' if fw == str(wid) else ' MISMATCH ' + p.stderr.strip()[:120]}")
+    __import__("threading").Thread(target=_focus_verify, args=(name, wid, reason), daemon=True).start()
     return fw == str(wid)
+
+def _focus_verify(name, wid, reason):
+    """0.6.23: the immediate front_wid check passes even when the manager window (mouse click
+    activation settling, refocus_manager) takes key back a moment later. Re-check after the
+    activation settles; if Terminal isn't frontmost or the manager/another window is front, refocus
+    the recorded zoomed wid once. Herd-recorded windows only; types nothing."""
+    for attempt in (1, 2):
+        time.sleep(0.35)
+        r = recorded(name)
+        if not r or not r.get("zoom") or int(r.get("wid") or 0) != wid: return
+        fa = "Terminal" if frontmost_pid() == _terminal_pid() else f"pid{frontmost_pid()}"
+        fw = subprocess.run(["osascript", "-e", 'tell application "Terminal" to return id of front window'], capture_output=True, text=True).stdout.strip()
+        if fa == "Terminal" and fw == str(wid):
+            if attempt == 2: _herd_log(f"focus_on_zoom verify {name} wid={wid} reason={reason} OK after refocus")
+            return
+        if attempt == 2: _herd_log(f"focus_on_zoom verify {name} wid={wid} reason={reason} still front={fa}/{fw} MISMATCH"); return
+        _herd_log(f"focus_on_zoom verify {name} wid={wid} reason={reason} lost focus (front={fa or '?'}/{fw or '?'}): refocusing")
+        subprocess.run(["osascript", "-e", f'''tell application "Terminal"
+  set index of window id {wid} to 1
+  activate
+  set frontmost of window id {wid} to true
+end tell'''], capture_output=True)
 
 def post_zoom(name, outline, reason):
     """Single post-zoom step for every zoom path: focus (if focus_on_zoom) THEN outline; the scrim
@@ -1421,7 +1444,10 @@ def zoom_to(name, outline=None, reason="select"):
     """Make `name` the (only) zoomed window, if it has one, then post_zoom (focus + outline).
     Returns True if something changed."""
     r = recorded(name)
-    if not r or r.get("zoom"): return False
+    if not r: return False
+    if r.get("zoom"):                   # 0.6.23: already zoomed (re-select / click): still focus it
+        post_zoom(name, outline, reason + "-already-zoomed")
+        return False
     with keep_front():
         zoom(name)                      # unzooms any other, zooms this one, retiles
     post_zoom(name, outline, reason)
@@ -1660,7 +1686,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.22 (event-woken loop, focus_on_zoom)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.23 (event-woken loop, focus_on_zoom)")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
         fw_hit = set()
@@ -1797,7 +1823,9 @@ def manager():
                     rec_ = _locked(lambda d: d.get(nm_)) if rows[sel]["window"] else None
                     zs.update(name=nm_, since=time.time(), done=False, will=bool(rec_ and not rec_.get("zoom")))
                 zoom_pending = not zs["done"] and zs.get("will")
-                if nm_ == zs["name"] and not zs["done"] and time.time() - zs["since"] >= 0.25:     # debounce arrow scrolling
+                deb_ = 0.4 if zs.get("click") else 0.25                  # 0.6.23: let the click's own activation of the manager settle
+                if nm_ == zs["name"] and not zs["done"] and time.time() - zs["since"] >= deb_:
+                    zs["click"] = False     # debounce arrow scrolling
                     zs["done"] = True
                     if rows[sel]["window"]:
                         try:
@@ -1889,7 +1917,7 @@ def manager():
                 except Exception: pass
             # wake deadlines (0.6.21): select() blocks with no timeout unless one of these is pending
             now_ = time.time(); dl_ = []
-            if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"] and not zs["done"]: dl_.append(zs["since"] + 0.25)     # select-zoom debounce
+            if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"] and not zs["done"]: dl_.append(zs["since"] + (0.4 if zs.get("click") else 0.25))     # select-zoom debounce
             if nz["name"]: dl_.append(nz["seen"] + 0.5 if nz["seen"] and nz["seen"] + 0.5 > now_ else nz["t"] + 15)            # new-session settle / give up
             if msg: dl_.append(msg_seen[1] + 4.01)                                                  # status message expiry
             if outline and outline.pend: dl_.append(outline.pend)                                   # frame-less window: bounds lookup retried at <= 1/s
@@ -1965,7 +1993,7 @@ def manager():
                     if my >= list_h: continue
                     idx = top + my
                     if idx >= len(rows): continue
-                    sel = idx; continue                                  # single click selects
+                    sel = idx; zs["name"] = None; zs["click"] = True; continue   # single click selects; 0.6.23: re-arm select-zoom even for the same row
                 else: continue
             ch = chr(k) if 0 <= k < 256 else ""
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc
