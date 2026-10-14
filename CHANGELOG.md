@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.27 - 2026-10-14
+
+### Changed
+- Selection never focuses: a single click on a session row or moving the selection with Up/Down (j/k) only zooms (after the 0.4 s / 0.25 s debounce); the manager stays/returns as Terminal's key window (normal raise-manager path, no focus verify/refocus).
+- Double click on a session row zooms AND focuses the zoomed terminal (BUTTON1_DOUBLE_CLICKED, or two clicks on the same row within 0.4 s). It cancels the pending single-click zoom; on an already zoomed session it just focuses it.
+- N (new), O (open) and Z (zoom on) still zoom + focus. `focus_on_zoom` now applies only to these explicit zooms; `_doc` updated.
 ## 0.6.26 - 2026-10-14
 
 ### Fixed

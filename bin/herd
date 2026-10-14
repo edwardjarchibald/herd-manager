@@ -43,7 +43,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_on_new":         (True,  None, "N: select the new session and zoom its window once it exists and has settled (same zoom as zoom_on_select)"),
     "zoom_on_open":        (True,  None, "O on a closed session: wait for its window to appear (15 s give-up), settle 0.5 s, then zoom + focus it (same flow as zoom_on_new)"),
-    "focus_on_zoom":       (True,  None, "after any zoom (N, select-zoom after its 250 ms debounce, Z on) activate Terminal and make the zoomed herd window key so it takes keystrokes; click the manager to navigate again"),
+    "focus_on_zoom":       (True,  None, "after an explicit zoom (N new, O open, Z on, double-click a session row) activate Terminal and make the zoomed herd window key so it takes keystrokes. Selection (single click, Up/Down) only zooms and never focuses: keyboard focus stays in the manager"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
     "min_cell_width":      (360,   None, "dock mode: narrowest terminal cell (px) before the grid adds a row instead of a column"),
@@ -1370,6 +1370,18 @@ def zoom(name):
     _locked(f); tile(quiet=True)
     return "off" if was else "on"
 
+DBL_CLICK_S = 0.4
+
+def classify_click(last, idx, bs, now):
+    """0.6.27: 'double' when curses reports BUTTON1_DOUBLE_CLICKED or this is the 2nd click on the
+    same row within DBL_CLICK_S; else 'single'. `last` = {"idx","t"} is updated in place (a double
+    resets it so a 3rd click starts over). Pure: unit-testable headless."""
+    import curses as _c
+    dbl = bool(bs & getattr(_c, "BUTTON1_DOUBLE_CLICKED", 0)) or (last.get("idx") == idx and now - last.get("t", 0.0) <= DBL_CLICK_S)
+    if dbl: last.update(idx=None, t=0.0)
+    else: last.update(idx=idx, t=now)
+    return "double" if dbl else "single"
+
 def mgr_zoom(cur, outline=None):
     """Manager Z key handler. Zoom on -> post_zoom (focus_on_zoom); zoom off keeps the front app."""
     with keep_front():
@@ -1443,26 +1455,28 @@ def _focus_verify(name, wid, reason):
   set frontmost of window id {wid} to true
 end tell'''], capture_output=True)
 
-def post_zoom(name, outline, reason):
-    """Single post-zoom step for every zoom path: focus (if focus_on_zoom) THEN outline; the scrim
-    re-orders itself below the zoomed window on the resulting app activation."""
-    foc = bool(cfg("focus_on_zoom"))
+def post_zoom(name, outline, reason, focus=True):
+    """Single post-zoom step for every zoom path: focus (explicit zooms only, if focus_on_zoom) THEN
+    outline; the scrim re-orders itself below the zoomed window on the resulting app activation.
+    0.6.27: focus=False (selection zoom) keeps/restores the manager as key and raises it normally."""
+    foc = bool(focus and cfg("focus_on_zoom"))
+    if not foc: _herd_log(f"zoom {name} reason={reason}: no focus (manager keeps key)")
     if foc: focus_zoomed(name, reason)
     else:
         with keep_front(): refocus_manager()
     if outline: outline.follow(name, force=True, raise_mgr=not foc)   # 0.6.26: never re-raise the manager over a focused zoom
 
-def zoom_to(name, outline=None, reason="select"):
+def zoom_to(name, outline=None, reason="select", focus=True):
     """Make `name` the (only) zoomed window, if it has one, then post_zoom (focus + outline).
     Returns True if something changed."""
     r = recorded(name)
     if not r: return False
     if r.get("zoom"):                   # 0.6.23: already zoomed (re-select / click): still focus it
-        post_zoom(name, outline, reason + "-already-zoomed")
+        post_zoom(name, outline, reason + "-already-zoomed", focus)
         return False
     with keep_front():
         zoom(name)                      # unzooms any other, zooms this one, retiles
-    post_zoom(name, outline, reason)
+    post_zoom(name, outline, reason, focus)
     return True
 
 def raise_behind_manager(wid):
@@ -1698,7 +1712,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.26 (event-woken loop, focus_on_zoom, zoom_on_open)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.27 (event-woken loop, select=zoom only, dblclick/N/O/Z focus)")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
         fw_hit = set()
@@ -1707,7 +1721,7 @@ def manager():
         _frames_cache[2] = fw.ok
         _herd_log(f"loop: select on stdin+wake pipe; file watch {'kqueue' if fw.ok else 'unavailable (stat fallback)'}")
         chime_st = {"epoch": -1, "quiet": 0.0, "blk": set(), "t": 0.0}   # blocked-chime state (see attention block)
-        zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
+        zs = {"name": None, "since": 0.0, "done": True}; lclick = {"idx": None, "t": 0.0}               # auto-zoom-on-select state
         nz = {"name": None, "t": 0.0, "seen": 0.0, "why": "new"}                     # N: select + zoom the new session's window
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
@@ -1842,7 +1856,7 @@ def manager():
                     zs["done"] = True
                     if rows[sel]["window"]:
                         try:
-                            if zoom_to(nm_, outline, "select-debounced"): sel_seen[0] = nm_; last = 0      # outline already at the zoomed frame
+                            if zoom_to(nm_, outline, "select-debounced", focus=False): sel_seen[0] = nm_; last = 0   # 0.6.27: selection never focuses      # outline already at the zoomed frame
                         except Exception as e: msg = f"! {e}"
                     zoom_pending = False; zs["scrim"] = True
             if scrim: scrim.update(suppress=gf["behind"] or hidden[0], force=sel_seen[0] is None or zs.pop("scrim", False))
@@ -2006,7 +2020,17 @@ def manager():
                     if my >= list_h: continue
                     idx = top + my
                     if idx >= len(rows): continue
-                    sel = idx; zs["name"] = None; zs["click"] = True; continue   # single click selects; 0.6.23: re-arm select-zoom even for the same row
+                    kind_ = classify_click(lclick, idx, bs, time.time())
+                    if kind_ == "single":
+                        sel = idx; zs["name"] = None; zs["click"] = True; continue   # single click selects + (debounced) zooms, no focus
+                    sel = idx; nm_ = rows[idx]["name"]                  # 0.6.27: double click = zoom AND focus now
+                    zs.update(name=nm_, since=time.time(), done=True, will=False, click=False); zs["scrim"] = True   # cancel the pending single-click zoom
+                    _herd_log(f"double-click {nm_}: zoom + focus")
+                    if rows[idx]["window"] and not hidden[0]:
+                        try:
+                            if zoom_to(nm_, outline, "double-click", focus=True): sel_seen[0] = nm_; last = 0
+                        except Exception as e: msg = f"! {e}"
+                    continue
                 else: continue
             ch = chr(k) if 0 <= k < 256 else ""
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc
