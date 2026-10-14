@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.19 - 2026-10-14
+
+### Fixed
+- Zoom scrim flicker: the scrim helper re-finds the zoomed Terminal window every 0.5 s (and on every app activation) by matching herd's zoom rect in the window list, and hid the scrim on the FIRST failed lookup; the next tick showed it again, so any transient miss (window-list churn during animations/app switches/Spaces, a few px of drift) made the scrim blink off and on. It now keeps ordering below the last known zoomed window while that window is still on screen and only hides after 4 consecutive misses (~2 s); the remembered window resets when the zoom rect changes.
+
+### Added
+- Scrim visibility logging in `~/.cache/herd/outline.log`: manager-side `[scrim] hide/show (reason)` and helper-side `scrim[pid] hide/show ...` lines, so any remaining flicker can be pinned down.
+
 ## 0.6.18 - 2026-10-13
 
 ### Added

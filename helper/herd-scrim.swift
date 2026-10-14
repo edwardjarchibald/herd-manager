@@ -41,12 +41,35 @@ func terminalWindowID(_ r: CGRect) -> CGWindowID? {
     return nil
 }
 // Re-order only (cheap CGWindowList read); the scrim is redrawn only when herd sends a new layout.
+// 0.6.19: a single failed lookup (window list mid-animation, Space/Mission Control, app activation, a few px
+// of drift) used to orderOut the panel and the next 0.5 s tick put it back = visible flicker. Now we keep the
+// last known zoomed window id while it still exists, and only hide after several consecutive misses.
+var lastWid: CGWindowID? = nil, misses = 0, shown = false
+let logPath = (NSHomeDirectory() as NSString).appendingPathComponent(".cache/herd/outline.log")
+func slog(_ m: String) {
+    let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"
+    let line = "\(f.string(from: Date())) scrim[\(getpid())] \(m)\n"
+    if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
+}
+func windowExists(_ wid: CGWindowID) -> Bool {
+    guard let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], wid) as? [[String: Any]], let w = info.first else { return false }
+    return (w[kCGWindowIsOnscreen as String] as? Bool) ?? false
+}
+func setShown(_ v: Bool, _ why: String) { if v != shown { shown = v; slog((v ? "show " : "hide ") + why) } }
 func reorder() {
-    guard active, let wid = terminalWindowID(zoomed) else { panel.orderOut(nil); return }
-    panel.order(.below, relativeTo: Int(wid))
+    guard active else { lastWid = nil; misses = 0; panel.orderOut(nil); setShown(false, "inactive"); return }
+    if let wid = terminalWindowID(zoomed) {
+        lastWid = wid; misses = 0
+        panel.order(.below, relativeTo: Int(wid)); setShown(true, "below \(wid)"); return
+    }
+    misses += 1
+    if let wid = lastWid, windowExists(wid) { panel.order(.below, relativeTo: Int(wid)); return }   // keep, don't flicker
+    if misses >= 4 { panel.orderOut(nil); setShown(false, "zoomed window not found (\(misses) misses)") }
 }
 func apply(_ p: [Double]) {
     guard p.count >= 10, (p.count - 6) % 4 == 0, let main = NSScreen.screens.first else { active = false; view.rects = []; reorder(); return }
+    let nz = CGRect(x: p[2], y: p[3], width: p[4] - p[2], height: p[5] - p[3])
+    if nz != zoomed { lastWid = nil; misses = 0 }
     zoomed = CGRect(x: p[2], y: p[3], width: p[4] - p[2], height: p[5] - p[3])
     var tiles: [CGRect] = []
     var i = 6

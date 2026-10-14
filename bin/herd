@@ -1079,7 +1079,7 @@ class Scrim:
     """Zoom scrim (helper/herd-scrim.swift): dark overlay over the terminal area, ordered directly below
     the zoomed window (so above the other herd terminals). Hidden when nothing is zoomed."""
     def __init__(self):
-        self.p = None; self.last = None; self.t = 0.0
+        self.p = None; self.last = None; self.t = 0.0; self.why = "start"
         src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-scrim.swift")
         binp = os.path.expanduser("~/.cache/herd/herd-scrim")
         try:
@@ -1092,6 +1092,7 @@ class Scrim:
     def _send(self, line):
         if self.p and self.p.poll() is not None: self.__init__()
         if not self.p or line == self.last: return
+        if (line == "hide") != (self.last == "hide") or self.last is None: _olog(f"[scrim] {'hide' if line == 'hide' else 'show'} ({self.why})")
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
     def update(self, suppress=False, force=False):
@@ -1102,7 +1103,10 @@ class Scrim:
         fr = layout_frames()                   # herd-computed tile/zoom rects (mtime-cached, no window lookups)
         zr = fr.get(z) if z else None
         tiles = [r for k, r in fr.items() if k != z]
-        if not z or not zr or not tiles or dim <= 0: self._send("hide"); return
+        if not z or not zr or not tiles or dim <= 0:
+            self.why = "suppressed (behind/hidden)" if suppress else "no zoomed session" if not z else "no layout frame" if not zr else "no tiles" if not tiles else "zoom_dim 0"
+            self._send("hide"); return
+        self.why = f"zoomed {z}"
         self._send(f"{dim:.2f} {cfg('scrim_radius')} " + " ".join(str(round(v)) for r in [zr, *tiles] for v in r))
 
 class Outline:
@@ -1510,7 +1514,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.18")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.19")
         att_ack = {}                                                   # session -> acknowledged attention key
         att_on = {}                                                    # session -> latched attention key
         sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
