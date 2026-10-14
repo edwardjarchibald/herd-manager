@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.24 - 2026-10-14
+
+### Fixed
+- O on a closed (detached) session opened its window but never zoomed or focused it: the select-zoom for that row had already run (no window then) and nothing re-armed when the window appeared. O now uses the same flow as N: wait for the window in windows.json (kqueue-woken, 15 s give-up), settle 0.5 s, then zoom_to + focus_on_zoom. Open/settle/give-up are logged to focus.log.
+
+### Added
+- `zoom_on_open` setting (default true).
+
 ## 0.6.23 - 2026-10-14
 
 ### Fixed

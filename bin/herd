@@ -42,6 +42,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "attention_highlight": (True,  None, "master switch for herdr-state colours: blocked = whole row dark-on-yellow + yellow window outline (overrides blue), working = whole row dark-on-orange (selection wins), done/idle = default look, no outline for working/done (alias: attention_flash)"),
     "zoom_on_select":      (True,  None, "zoom the selected session's window automatically (click/arrows, 250 ms debounce); Z toggles it until the selection changes"),
     "zoom_on_new":         (True,  None, "N: select the new session and zoom its window once it exists and has settled (same zoom as zoom_on_select)"),
+    "zoom_on_open":        (True,  None, "O on a closed session: wait for its window to appear (15 s give-up), settle 0.5 s, then zoom + focus it (same flow as zoom_on_new)"),
     "focus_on_zoom":       (True,  None, "after any zoom (N, select-zoom after its 250 ms debounce, Z on) activate Terminal and make the zoomed herd window key so it takes keystrokes; click the manager to navigate again"),
     "zoom_scale":          (0.8,   None, "zoomed window size as a fraction of the terminal area"),
     "max_terminals":       (0,     None, "maximum number of sessions/terminals; 0 or null = automatic (session rows the manager shows at manager_font_min)"),
@@ -1686,7 +1687,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.23 (event-woken loop, focus_on_zoom)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.24 (event-woken loop, focus_on_zoom, zoom_on_open)")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
         fw_hit = set()
@@ -1696,7 +1697,7 @@ def manager():
         _herd_log(f"loop: select on stdin+wake pipe; file watch {'kqueue' if fw.ok else 'unavailable (stat fallback)'}")
         chime_st = {"epoch": -1, "quiet": 0.0, "blk": set(), "t": 0.0}   # blocked-chime state (see attention block)
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
-        nz = {"name": None, "t": 0.0, "seen": 0.0}                     # N: select + zoom the new session's window
+        nz = {"name": None, "t": 0.0, "seen": 0.0, "why": "new"}                     # N: select + zoom the new session's window
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
         HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
@@ -1811,12 +1812,13 @@ def manager():
                     if not nz["seen"]: nz["seen"] = time.time()
                     elif time.time() - nz["seen"] >= 0.5:               # let the window settle before zooming
                         nm_ = nz["name"]; nz["name"] = None
-                        if cfg("zoom_on_new") and not hidden[0] and not gf["behind"]:
+                        why_ = nz.get("why", "new"); _herd_log(f"{why_}: window for {nm_} settled, zooming")
+                        if cfg("zoom_on_open" if why_ == "open" else "zoom_on_new") and not hidden[0] and not gf["behind"]:
                             try:
-                                if zoom_to(nm_, outline, "new"): sel_seen[0] = nm_; last = 0
+                                if zoom_to(nm_, outline, why_): sel_seen[0] = nm_; last = 0
                             except Exception as e: msg = f"! {e}"
                         zs.update(name=nm_, since=time.time(), done=True, will=False); zs["scrim"] = True
-                elif time.time() - nz["t"] > 15: nz["name"] = None       # window never showed up: give up
+                elif time.time() - nz["t"] > 15: _herd_log(f"{nz.get('why')}: no window for {nz['name']} after 15 s, giving up"); nz["name"] = None       # window never showed up: give up
             if rows and cfg("zoom_on_select") and not hidden[0] and not gf["behind"]:
                 nm_ = rows[sel]["name"]
                 if nm_ != zs["name"]:
@@ -2015,8 +2017,11 @@ def manager():
                         msg = f"detached {cur}" if detach(cur) else f"{cur}: not attached"; refocus_manager()
                     else:
                         if stub_open: open(stub_open, "a").write(cur + "\n")
-                        else: open_(cur, quiet=True, background=True)
-                        msg = f"opened {cur}"
+                        else:
+                            try: open_(cur, quiet=True, background=True)
+                            except Exception as e: _herd_log(f"open: {cur} FAILED: {e}"); raise
+                        msg = f"opened {cur}"; _herd_log(f"open: {cur} opened, waiting for window to zoom")
+                        nz.update(name=cur, t=time.time(), seen=0.0, why="open")   # 0.6.24: zoom + focus once its window settles (like N)
                     sel_seen[0] = None; last = 0                       # outline follows right away
                 elif ch == "A":
                     v = prompt(f"kill ALL {len(rows)} sessions? [y/N] ")
@@ -2029,7 +2034,7 @@ def manager():
                     import contextlib, io
                     with contextlib.redirect_stdout(io.StringIO()): n = new()
                     if n: open_(n, quiet=True, background=True); msg = f"new {n}"; last = 0; sel_seen[0] = None
-                    if n: nz.update(name=n, t=time.time(), seen=0.0)
+                    if n: nz.update(name=n, t=time.time(), seen=0.0, why="new")
                 elif ch == "F":
                     msg = group_focus(gf)
                     gf["behind"] = not gf["on"]; gf["t"] = time.time()
