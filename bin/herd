@@ -1260,7 +1260,7 @@ class Outline:
         _olog(f"send {line}" if self.tag == "sel" else f"[{self.tag}] send {line}")
         try: self.p.stdin.write(line + "\n"); self.p.stdin.flush(); self.last = line
         except (OSError, ValueError): self.p = None
-    def follow(self, name, force=False):
+    def follow(self, name, force=False, raise_mgr=True):
         """Point the border at session `name`'s window, at the frame herd computed for it in tile() (tile
         or zoom rect; no window lookup), or hide if it has no window. Only a window without a computed
         frame (e.g. on another display) falls back to its live Terminal bounds (~1/s)."""
@@ -1269,7 +1269,11 @@ class Outline:
         self.t = time.time(); self.pend = 0.0
         r = _locked(lambda d: d.get(name)) if name else None
         if not r: self._send("hide"); return
-        if force: raise_behind_manager(r["wid"])
+        if force:
+            # 0.6.26: after focus_on_zoom the zoomed window must stay key; raising the manager here
+            # (set index 1) made the manager window Terminal's front/key window ~immediately after focus.
+            if raise_mgr: raise_behind_manager(r["wid"])
+            else: _herd_log(f"outline follow {name}: skip manager raise (focus_on_zoom)")
         fr = layout_frames().get(name)
         if fr:                                                       # herd placed it: no window lookup
             self.fails = 0; self._send(f"{'+' if r.get('zoom') else ''}{int(r['wid'])} " + " ".join(str(round(v)) for v in fr)); return
@@ -1442,10 +1446,11 @@ end tell'''], capture_output=True)
 def post_zoom(name, outline, reason):
     """Single post-zoom step for every zoom path: focus (if focus_on_zoom) THEN outline; the scrim
     re-orders itself below the zoomed window on the resulting app activation."""
-    if cfg("focus_on_zoom"): focus_zoomed(name, reason)
+    foc = bool(cfg("focus_on_zoom"))
+    if foc: focus_zoomed(name, reason)
     else:
         with keep_front(): refocus_manager()
-    if outline: outline.follow(name, force=True)
+    if outline: outline.follow(name, force=True, raise_mgr=not foc)   # 0.6.26: never re-raise the manager over a focused zoom
 
 def zoom_to(name, outline=None, reason="select"):
     """Make `name` the (only) zoomed window, if it has one, then post_zoom (focus + outline).
@@ -1693,7 +1698,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.25 (event-woken loop, focus_on_zoom, zoom_on_open)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.26 (event-woken loop, focus_on_zoom, zoom_on_open)")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
         fw_hit = set()

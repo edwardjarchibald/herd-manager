@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.26 - 2026-10-14
+
+### Fixed
+- focus_on_zoom lost focus to the manager window ~0.35 s after every select-zoom/open (verify always logged `lost focus (front=Terminal/655)`). Root cause: post_zoom called focus_zoomed and THEN outline.follow(force=True), which ran raise_behind_manager -> `set index of window id <manager> to 1`, making the manager Terminal's front/key window again. With focus_on_zoom on, post_zoom now tells the outline not to raise the manager (logged `outline follow <name>: skip manager raise`); the zoomed window keeps key on the first try. _focus_verify stays as a safety net.
+
 ## 0.6.25 - 2026-10-14
 
 ### Fixed
