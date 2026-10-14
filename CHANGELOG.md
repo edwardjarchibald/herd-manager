@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.20 - 2026-10-14
+
+### Changed
+- Zoom scrim is event-driven. The manager now passes the zoomed window's known CGWindowID (windows.json), the pid of its `herdr terminal attach` client, and herd's computed frames. herd-scrim orders itself below that window id only on events: manager commands (zoom/selection/layout change; a new `order` command re-orders when frames are unchanged), NSWorkspace app activation (plus one 0.15 s follow-up, since Terminal raises its windows after posting it), active-Space change, wake, and screen-parameter changes. The 0.5 s timer, the rect-matching window-list search (±4-6 px) and the 0.6.19 4-miss grace are gone.
+- Zoomed window closed: closing the Terminal window kills its attach client; the helper watches that pid (DispatchSource process exit) and hides the scrim at once. On every event it also checks that one window id is on screen (minimized/other Space/closed → hide until the next event).
+- Helper protocol: `<alpha> <radius> <wid> <attach pid|0> <zoom l t r b> [<tile l t r b>]...`, `order`, or `hide`.
+
+### Removed
+- The manager's 1 s background focus watcher (an `osascript` every second for Terminal's front window id). Its only consumer was the attention acknowledgement map, unused since 0.6.12.
+- herd-outline's old tracking mode (no `--static`: a 0.5 s CGWindowList rect search). herd has used only `--static` since 0.6.11.
+
 ## 0.6.19 - 2026-10-14
 
 ### Fixed

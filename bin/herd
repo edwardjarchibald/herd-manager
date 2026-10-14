@@ -1079,7 +1079,7 @@ class Scrim:
     """Zoom scrim (helper/herd-scrim.swift): dark overlay over the terminal area, ordered directly below
     the zoomed window (so above the other herd terminals). Hidden when nothing is zoomed."""
     def __init__(self):
-        self.p = None; self.last = None; self.t = 0.0; self.why = "start"
+        self.p = None; self.last = None; self.t = 0.0; self.why = "start"; self.apid = [None, 0]
         src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "helper", "herd-scrim.swift")
         binp = os.path.expanduser("~/.cache/herd/herd-scrim")
         try:
@@ -1106,8 +1106,24 @@ class Scrim:
         if not z or not zr or not tiles or dim <= 0:
             self.why = "suppressed (behind/hidden)" if suppress else "no zoomed session" if not z else "no layout frame" if not zr else "no tiles" if not tiles else "zoom_dim 0"
             self._send("hide"); return
-        self.why = f"zoomed {z}"
-        self._send(f"{dim:.2f} {cfg('scrim_radius')} " + " ".join(str(round(v)) for r in [zr, *tiles] for v in r))
+        rec = _locked(lambda d: d.get(z)) or {}
+        wid = int(rec.get("wid") or 0)
+        if not wid: self.why = "no window id"; self._send("hide"); return
+        if self.apid[0] != (z, wid):                       # attach client pid: once per zoomed window (helper watches its exit)
+            pid = 0
+            try:
+                tid = rec.get("tid") or find(z)[1]["terminal_id"]
+                o = subprocess.run(["pgrep", "-f", f"herdr terminal attach {tid}( |$)"], capture_output=True, text=True, timeout=2).stdout.split()
+                pid = int(o[0]) if o else 0
+            except Exception: pid = 0
+            self.apid = [(z, wid), pid]
+        self.why = f"zoomed {z} wid {wid}"
+        line = f"{dim:.2f} {cfg('scrim_radius')} {wid} {self.apid[1]} " + " ".join(str(round(v)) for r in [zr, *tiles] for v in r)
+        if force and line == self.last and self.p:          # zoom/selection/layout event, same frames: re-order only
+            try: self.p.stdin.write("order\n"); self.p.stdin.flush()
+            except (OSError, ValueError): self.p = None
+            return
+        self._send(line)
 
 class Outline:
     """Green border around the selected session's herd window, drawn by a tiny Swift helper
@@ -1514,25 +1530,8 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.19")
-        att_ack = {}                                                   # session -> acknowledged attention key
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.20")
         att_on = {}                                                    # session -> latched attention key
-        sel_ev = [None, None]                                          # [row clicked in the list (explicit select), last selected name]
-        front_win = [None, None]                                       # [Terminal front window id if Terminal is frontmost, last seen]
-        def _focus_watch():                                            # off the UI thread: osascript can take 100+ ms
-            import threading
-            def run():
-                while True:
-                    try:
-                        o = subprocess.run(["osascript", "-l", "JavaScript", "-e",
-                            "ObjC.import('AppKit'); var a=$.NSWorkspace.sharedWorkspace.frontmostApplication; "
-                            "(!a.isNil() && ObjC.unwrap(a.bundleIdentifier)=='com.apple.Terminal') ? String(Application('Terminal').windows[0].id()) : ''"],
-                            capture_output=True, text=True, timeout=3).stdout.strip()
-                        front_win[0] = int(o) if o.isdigit() else None
-                    except Exception: front_win[0] = None
-                    time.sleep(1.0)
-            threading.Thread(target=run, daemon=True).start()
-        if not os.environ.get("HERD_TEST_SANDBOX"): _focus_watch()
         hev = HerdrEvents(); last_rl = [time.time()]
         chime_st = {"epoch": -1, "quiet": 0.0, "blk": set(), "t": 0.0}   # blocked-chime state (see attention block)
         zs = {"name": None, "since": 0.0, "done": True}               # auto-zoom-on-select state
@@ -1605,22 +1604,10 @@ def manager():
             for n_ in [n_ for n_ in att_on if n_ not in cur_]: _herd_log(f"attention CLEAR {n_} (herdr: {next((r_.get('agent') for r_ in rows if r_['name'] == n_), 'gone')})"); att_on.pop(n_)
             for n_, k_ in cur_.items():
                 if att_on.get(n_) != k_: _herd_log(f"attention SET {n_} ({k_})"); att_on[n_] = k_
-            if rows:
-                nm_ = rows[sel]["name"]
-                if nm_ != sel_ev[1] or sel_ev[0] == nm_:                # selection event (moved onto it / row clicked)
-                    if rows[sel].get("att"): att_ack[nm_] = rows[sel]["att"]
-                sel_ev[0] = None; sel_ev[1] = nm_
-            fw_ = front_win[0]                                          # from the background focus watcher
-            if fw_ and fw_ != front_win[1]:                             # Terminal front window CHANGED (a click)
-                front_win[1] = fw_
-                recs_ = _locked(lambda d: dict(d))
-                for r_ in rows:
-                    if recs_.get(r_["name"], {}).get("wid") == fw_:
-                        if r_.get("att"): att_ack[r_["name"]] = r_["att"]
             if nz["name"]:                                              # N: wait for the new window, then select + zoom
                 idx_ = next((i for i, r in enumerate(rows) if r["name"] == nz["name"]), None)
                 rec_ = _locked(lambda d: d.get(nz["name"])) if idx_ is not None and rows[idx_]["window"] else None
-                if idx_ is not None and sel != idx_: sel = idx_; sel_ev[1] = nz["name"]
+                if idx_ is not None and sel != idx_: sel = idx_
                 if rec_ and rec_.get("wid"):
                     if not nz["seen"]: nz["seen"] = time.time()
                     elif time.time() - nz["seen"] >= 0.5:               # let the window settle before zooming
@@ -1782,7 +1769,7 @@ def manager():
                     if my >= list_h: continue
                     idx = top + my
                     if idx >= len(rows): continue
-                    sel = idx; sel_ev[0] = rows[idx]["name"]; continue  # single click selects (explicit select event)
+                    sel = idx; continue                                  # single click selects
                 else: continue
             ch = chr(k) if 0 <= k < 256 else ""
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc

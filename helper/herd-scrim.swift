@@ -1,11 +1,19 @@
 // herd-scrim: dark, click-through, non-activating scrim for zoom. Drawn as the union of rounded rects,
 // one per tiled (non-zoomed) herd terminal, using herd's computed frames from layout.json, so the gap
 // to the manager/dock panel and the gaps between tiles stay clear and each terminal reads as dimmed.
-// Ordered DIRECTLY BELOW the zoomed Terminal window (found by its herd-computed zoom rect in
-// CGWindowList, no osascript), so it sits above the other herd terminals but under the zoomed one.
+// Ordered DIRECTLY BELOW the zoomed Terminal window, whose CGWindowID herd already knows (windows.json),
+// so it sits above the other herd terminals but under the zoomed one.
+// 0.6.20: fully event-driven, no timer and no window-list search. It re-orders itself only on:
+//   - a command from the manager (zoom / selection / layout change; "order" = re-order only)
+//   - NSWorkspace app activation (+ one 0.15 s follow-up, Terminal raises its windows after posting it), active-Space change, wake; NSApplication screen-parameter change
+//   - exit of the zoomed window's `herdr terminal attach` client (DispatchSource process watch): closing
+//     the Terminal window kills that client, so the scrim hides at once.
+// On each of those it asks the window server about that ONE window id; if it is not on screen
+// (minimized, other Space, closed) the scrim hides until the next event.
 // Started by the herd manager; exits when stdin closes.
 // stdin, one command per line (top-left coordinates of the main screen):
-//   "<alpha> <radius> <zl> <zt> <zr> <zb> [<l> <t> <r> <b>]..."   dim the given tile rects below the window at z*
+//   "<alpha> <radius> <wid> <attach pid|0> <zl> <zt> <zr> <zb> [<l> <t> <r> <b>]..."   dim the tile rects below window <wid>
+//   "order"   re-order below the current window (it may have been raised)
 //   "hide"
 import AppKit
 
@@ -27,70 +35,72 @@ panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
 panel.ignoresMouseEvents = true; panel.level = .normal
 panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
 let view = V(); panel.contentView = view
-var active = false, zoomed = CGRect.zero
+var wid: CGWindowID = 0, shown = false, closed = false
+var lastParams: [Double] = []
+var procWatch: DispatchSourceProcess? = nil, watchedPid: pid_t = 0
 
-func terminalWindowID(_ r: CGRect) -> CGWindowID? {
-    guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-    let pids = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").map { $0.processIdentifier })
-    for w in info {
-        guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, pids.contains(pid), (w[kCGWindowLayer as String] as? Int) == 0,
-              let b = w[kCGWindowBounds as String] as? [String: CGFloat], let num = w[kCGWindowNumber as String] as? CGWindowID else { continue }
-        let wr = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
-        if abs(wr.minX - r.minX) <= 4 && abs(wr.minY - r.minY) <= 4 && abs(wr.width - r.width) <= 6 && abs(wr.height - r.height) <= 6 { return num }
-    }
-    return nil
-}
-// Re-order only (cheap CGWindowList read); the scrim is redrawn only when herd sends a new layout.
-// 0.6.19: a single failed lookup (window list mid-animation, Space/Mission Control, app activation, a few px
-// of drift) used to orderOut the panel and the next 0.5 s tick put it back = visible flicker. Now we keep the
-// last known zoomed window id while it still exists, and only hide after several consecutive misses.
-var lastWid: CGWindowID? = nil, misses = 0, shown = false
 let logPath = (NSHomeDirectory() as NSString).appendingPathComponent(".cache/herd/outline.log")
 func slog(_ m: String) {
     let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"
     let line = "\(f.string(from: Date())) scrim[\(getpid())] \(m)\n"
     if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
 }
-func windowExists(_ wid: CGWindowID) -> Bool {
-    guard let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], wid) as? [[String: Any]], let w = info.first else { return false }
-    return (w[kCGWindowIsOnscreen as String] as? Bool) ?? false
+func onScreen(_ w: CGWindowID) -> Bool {      // one window, by id: no list search, no rect matching
+    guard w != 0, let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], w) as? [[String: Any]], let i = info.first else { return false }
+    return (i[kCGWindowIsOnscreen as String] as? Bool) ?? false
 }
 func setShown(_ v: Bool, _ why: String) { if v != shown { shown = v; slog((v ? "show " : "hide ") + why) } }
-func reorder() {
-    guard active else { lastWid = nil; misses = 0; panel.orderOut(nil); setShown(false, "inactive"); return }
-    if let wid = terminalWindowID(zoomed) {
-        lastWid = wid; misses = 0
-        panel.order(.below, relativeTo: Int(wid)); setShown(true, "below \(wid)"); return
-    }
-    misses += 1
-    if let wid = lastWid, windowExists(wid) { panel.order(.below, relativeTo: Int(wid)); return }   // keep, don't flicker
-    if misses >= 4 { panel.orderOut(nil); setShown(false, "zoomed window not found (\(misses) misses)") }
+func hide(_ why: String) { panel.orderOut(nil); setShown(false, why) }
+func reorder(_ why: String) {
+    guard wid != 0 else { hide("inactive (\(why))"); return }
+    if closed { hide("zoomed window \(wid) closed"); return }
+    guard onScreen(wid) else { hide("zoomed window \(wid) not on screen (\(why))"); return }
+    panel.order(.below, relativeTo: Int(wid)); setShown(true, "below \(wid) (\(why))")
 }
-func apply(_ p: [Double]) {
-    guard p.count >= 10, (p.count - 6) % 4 == 0, let main = NSScreen.screens.first else { active = false; view.rects = []; reorder(); return }
-    let nz = CGRect(x: p[2], y: p[3], width: p[4] - p[2], height: p[5] - p[3])
-    if nz != zoomed { lastWid = nil; misses = 0 }
-    zoomed = CGRect(x: p[2], y: p[3], width: p[4] - p[2], height: p[5] - p[3])
+func watch(_ pid: pid_t) {
+    if pid == watchedPid { return }
+    procWatch?.cancel(); procWatch = nil; watchedPid = pid
+    guard pid > 0 else { return }
+    if kill(pid, 0) != 0 { closed = true; return }
+    let s = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+    s.setEventHandler { closed = true; slog("attach client \(pid) exited"); reorder("window closed") }
+    s.resume(); procWatch = s
+}
+func apply(_ line: String) {
+    if line == "order" { reorder("order"); return }
+    let p = line.split(separator: " ").compactMap { Double($0) }
+    guard p.count >= 12, (p.count - 8) % 4 == 0, let main = NSScreen.screens.first else {
+        wid = 0; lastParams = []; watch(0); closed = false; view.rects = []; reorder("hide"); return
+    }
+    let nw = CGWindowID(p[2])
+    if nw != wid { closed = false }
+    wid = nw; watch(pid_t(p[3])); lastParams = p
     var tiles: [CGRect] = []
-    var i = 6
+    var i = 8
     while i + 3 < p.count { tiles.append(CGRect(x: p[i], y: p[i+1], width: p[i+2] - p[i], height: p[i+3] - p[i+1])); i += 4 }
     let u = tiles.dropFirst().reduce(tiles[0]) { $0.union($1) }
     let H = main.frame.height
     panel.setFrame(NSRect(x: u.minX, y: H - u.maxY, width: u.width, height: u.height), display: false)
     view.alpha = CGFloat(p[0]); view.radius = CGFloat(p[1])
     view.rects = tiles.map { NSRect(x: $0.minX - u.minX, y: u.maxY - $0.maxY, width: $0.width, height: $0.height) }
-    view.needsDisplay = true; active = true
-    reorder()
+    view.needsDisplay = true
+    reorder("layout")
 }
 DispatchQueue.global().async {
     while let line = readLine() {
-        let p = line.split(separator: " ").compactMap { Double($0) }
-        DispatchQueue.main.async { apply(p) }
+        let l = line.trimmingCharacters(in: .whitespaces)
+        DispatchQueue.main.async { apply(l) }
     }
     DispatchQueue.main.async { exit(0) }
 }
-Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in reorder() }
-NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
-    reorder(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder() }
+let wnc = NSWorkspace.shared.notificationCenter
+wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
+    // Terminal raises its windows just AFTER posting activation: one follow-up re-order (one-shot, not a timer)
+    reorder("app activated"); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder("app activated +0.15s") }
+}
+wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in reorder("space changed") }
+wnc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in reorder("wake") }
+NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+    if !lastParams.isEmpty { apply(lastParams.map { String($0) }.joined(separator: " ")) } else { reorder("screens changed") }
 }
 app.run()
