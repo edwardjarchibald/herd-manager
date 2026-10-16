@@ -14,7 +14,7 @@ into any session by name, and closing a window never kills the session.
 - macOS with Terminal.app
 - [herdr](https://herdr.dev) (0.9.x) with its background server
 - python3 (the Xcode Command Line Tools one is fine; stdlib only)
-- optional: `swiftc` (Xcode Command Line Tools) for the green window outline
+- optional: `swiftc` (Xcode Command Line Tools) for the window outlines
 
 No window manager and no Accessibility permission are needed. herd talks to Terminal through its
 AppleScript dictionary, so macOS asks once for permission to control Terminal.
@@ -101,7 +101,7 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `dock_min_width` | `920` | | Minimum width (px) of the dock-mode left panel (manager + dock) |
 | `dock_panel_fraction` | `0.3` | | Dock-mode left panel width as a fraction of the tiled width |
 | `zoom_dim` | `0.85` | `HERD_ZOOM_DIM` | Opacity of the dark scrim under a zoomed window (0 = off) |
-| `attention_highlight` | `true` | | Highlight a session's name (dark on yellow) when its agent is done or blocked, until you select it or click its window (old name `attention_flash` accepted) |
+| `attention_highlight` | `true` | | herdr-state colours: blocked = whole row dark on orange + orange window outline; working/busy = whole row dark on teal + teal outline on the selected/zoomed window; done/idle = plain (green name, gray row). A selected row keeps its state colour (old name `attention_flash` accepted) |
 | `zoom_on_select` | `true` | | Zoom the selected session's window automatically (250 ms debounce); Z unzooms until the selection changes |
 | `zoom_scale` | `0.8` | | Zoomed window size as a fraction of the terminal area |
 | `max_terminals` | `0` | | Max sessions; 0 = automatic (rows the manager shows at `manager_font_min`) |
@@ -109,9 +109,12 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `gap` | `8` | | Gap (px) between tiled windows |
 | `manager_width` | `520` | | Manager column width in dock-off mode |
 | `manager_font_max` / `manager_font_min` | `16` / `9` | | Font range the dock-mode manager fits all sessions into |
-| `selection_color_256` | `25` | | Selected-row background (xterm-256 index; 25 = #005faf) |
+| `working_color_256` | `37` | | Busy-row background (xterm-256 index; 37 = #00afaf teal) |
+| `blocked_color_256` | `208` | | Blocked-row background (xterm-256 index; 208 = #ff8700 orange) |
+| `blocked_outline_rgb` | `"255 135 0"` | | Outline colour of blocked sessions' windows (replaces `attention_outline_rgb`, no longer read) |
+| `working_outline_rgb` | `"0 175 175"` | | Outline colour of the selected/zoomed window while its session is busy |
 | `outline` | `true` | `HERD_NO_OUTLINE=1` disables | Outline around the selected session's window |
-| `outline_rgb` | `"0 95 175"` | `HERD_OUTLINE_RGB` | Outline colour |
+| `outline_rgb` | `"255 255 255"` | `HERD_OUTLINE_RGB` | Selection outline colour (white) |
 | `outline_px` | `6` | `HERD_OUTLINE_PX` | Outline thickness |
 | `outline_radius` | `16` (10 before macOS 26) | `HERD_OUTLINE_RADIUS` | Outline corner radius |
 
@@ -140,8 +143,11 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 
-The selected session's own Terminal window gets a 6px outline in the selection colour (slate blue
-#005faf, the same as the selected row), hugging the window's rounded corners (16pt on macOS 26, 10pt before;
+Colours: blocked = orange, busy = teal, done/idle = plain; there is no blue and no red. The selected row is
+marked by a white `[ ]` bracket frame at both ends of the row and keeps its state colour. The selected (or
+zoomed) session's own Terminal window gets a 6px white outline; if that session is blocked its window shows the
+orange outline, if busy the teal one, with the white selection ring just outside it (a zoomed window always has
+an outline). Other blocked windows keep their orange outline. The outlines are drawn hugging the window's rounded corners (16pt on macOS 26, 10pt before;
 override with `HERD_OUTLINE_PX`, `HERD_OUTLINE_RADIUS`, `HERD_OUTLINE_RGB`), drawn by a tiny helper
 (`helper/herd-outline.swift`, compiled with `swiftc` into `~/.cache/herd` on first use; skipped if
 swiftc isn't available). It's a borderless, click-through, non-activating overlay at the normal window level, kept directly

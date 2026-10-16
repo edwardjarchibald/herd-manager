@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.29 - 2026-10-16
+
+### Changed
+- New colour scheme, no blue and no red anywhere: blocked = ORANGE (row `blocked_color_256` 208 + window outline `blocked_outline_rgb` "255 135 0", was yellow), busy/working = TEAL (row `working_color_256` 37, was orange; outline `working_outline_rgb` "0 175 175" on the selected/zoomed window), done/idle unchanged (green name, gray row). The "!" error message colour is orange text (was red).
+- Selection no longer changes a row's colour: the selected row keeps its state colour and gets a white `[ ]` bracket frame at both ends. `selection_color_256` is gone.
+- Selected/zoomed window outline is WHITE (`outline_rgb` default "255 255 255", was blue). If the session is blocked/busy the window shows the orange/teal outline and the white ring is drawn just outside it; the zoomed window always has at least its white ring (self-check updated). Blocked overrides busy. desired_outlines() now returns (white_name, orange_set, teal_set, grow); a third helper instance draws the teal ring. No new polling.
+- Config: `attention_outline_rgb` renamed `blocked_outline_rgb` (old key is no longer read: its yellow value would defeat the new scheme); `selection_color_256` removed (ignored if present).
+
 ## 0.6.28 - 2026-10-16
 
 ### Fixed
