@@ -40,7 +40,7 @@ app.setActivationPolicy(.accessory)
 let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
 panel.ignoresMouseEvents = true
-panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+panel.collectionBehavior = [.managed, .ignoresCycle]   // 0.6.28: ONE Space (was .canJoinAllSpaces); shown/active only while the herd manager window is on the active Space
 let view = DockView(); panel.contentView = view
 
 var area: CGRect? = nil, areaMtime: Date? = nil
@@ -71,6 +71,20 @@ func show(_ mode: Int) {   // 0 hidden, 1 faint, 2 bright
     panel.level = b ? .floating : .normal
     if b || !panel.isVisible { panel.orderFrontRegardless() }
 }
+/// 0.6.28: the dock lives on the herd manager's Space: the manager window (windows.json "__manager__") must be on the active Space.
+let winFile = cfg + "/windows.json"
+var winMtime: Date? = nil, managerWid: CGWindowID = 0
+func managerOnActiveSpace() -> Bool {
+    let m = (try? FileManager.default.attributesOfItem(atPath: winFile))?[.modificationDate] as? Date
+    if m != winMtime {
+        winMtime = m; managerWid = 0
+        if let d = FileManager.default.contents(atPath: winFile),
+           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+           let mg = j["__manager__"] as? [String: Any], let w = mg["wid"] as? Int { managerWid = CGWindowID(w) }
+    }
+    guard managerWid != 0, let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], managerWid) as? [[String: Any]], let i = info.first else { return false }
+    return (i[kCGWindowIsOnscreen as String] as? Bool) ?? false
+}
 func center(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
 
 /// AX window of `pid` whose frame matches `frame` (the CG bounds).
@@ -97,6 +111,8 @@ func fit(_ w: AXUIElement, _ a: CGRect) {
 func tick() {
     loadArea()
     guard let a = area else { show(0); last = [:]; cand = nil; return }
+    // Another Space is active: no overlay, no drop detection (windows seen there are not on the herd Space).
+    guard managerOnActiveSpace() else { show(0); last = [:]; cand = nil; return }
     let info = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
     var now: [CGWindowID: (CGRect, pid_t)] = [:]
     for w in info {

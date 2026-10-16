@@ -33,7 +33,7 @@ app.setActivationPolicy(.accessory)
 let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
 panel.ignoresMouseEvents = true; panel.level = .normal
-panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+panel.collectionBehavior = [.managed, .ignoresCycle]   // 0.6.28: ONE Space (was .canJoinAllSpaces); only ordered in while the zoomed window is on the active Space
 let view = V(); panel.contentView = view
 var wid: CGWindowID = 0, shown = false, closed = false
 var lastParams: [Double] = []
@@ -103,7 +103,9 @@ wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object:
     // Terminal raises its windows just AFTER posting activation: one follow-up re-order (one-shot, not a timer)
     reorder("app activated"); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder("app activated +0.15s") }
 }
-wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in reorder("space changed") }
+wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+    reorder("space changed"); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder("space changed +0.15s") }   // window list lags the notification
+}
 wnc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in reorder("wake") }
 NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
     if !lastParams.isEmpty { apply(lastParams.map { String($0) }.joined(separator: " ")) } else { reorder("screens changed") }

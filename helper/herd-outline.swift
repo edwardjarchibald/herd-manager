@@ -44,13 +44,22 @@ if CommandLine.arguments.contains("--static") {
     func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false; p.ignoresMouseEvents = true
-        p.level = .normal; p.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        p.level = .normal; p.collectionBehavior = [.managed, .ignoresCycle]   // 0.6.28: ONE Space (never .canJoinAllSpaces/.stationary/.transient); shown only while its target window is on the active Space
         p.contentView = BorderView()
         return p
+    }
+    // 0.6.28: one window, by id: is it on screen = on the ACTIVE Space (and not minimized/closed)?
+    func onScreen(_ w: Int) -> Bool {
+        guard w > 0, let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(w)) as? [[String: Any]], let i = info.first else { return false }
+        return (i[kCGWindowIsOnscreen as String] as? Bool) ?? false
     }
     func reorder() {
         let tf = terminalFront()
         for (i, (p, w)) in zip(panels, wids).enumerated() {
+            // Target window not on the active Space: take the ring off screen (it re-shows on the next
+            // event once the target's Space is active again). A ring is only ever ordered in while its
+            // target is on screen, so it is created on / stays with that window's Space.
+            guard onScreen(w) else { if p.isVisible { p.orderOut(nil) }; continue }
             let lvl: NSWindow.Level = (tf && i < tops.count && tops[i]) ? .floating : .normal
             if p.level != lvl { p.level = lvl }
             if lvl == .floating { p.orderFrontRegardless() } else { p.order(.above, relativeTo: w) }
@@ -85,6 +94,12 @@ if CommandLine.arguments.contains("--static") {
     NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in
         reorder(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder() }
     }
+    // 0.6.28: Space switch -> hide rings whose window is on another Space, re-show them when the herd Space returns
+    // (event + one 0.15 s follow-up, the window list lags the notification slightly; no timer, no polling).
+    NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+        reorder(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { reorder() }
+    }
+    NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in reorder() }
     app.run()
     exit(0)
 }

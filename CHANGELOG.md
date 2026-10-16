@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.28 - 2026-10-16
+
+### Fixed
+- The zoomed (blue) outline, the yellow attention outlines, the zoom scrim and the dock overlay showed up on ALL macOS Spaces (e.g. a blue ring floating over an empty desktop on another Space). Root cause: every overlay NSPanel was created with `collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]` (herd-outline.swift, herd-scrim.swift, herd-dock.swift). All three now use `[.managed, .ignoresCycle]` (one Space, no all-Spaces/stationary/moveToActiveSpace).
+- Overlays are only ordered in while their target window is on screen on the active Space (single-window CGWindowListCopyWindowInfo by id): outline rings per ring wid, scrim for the zoomed wid, dock for the manager's wid from windows.json. Otherwise they are `orderOut`. herd-outline now also listens to NSWorkspace.activeSpaceDidChange (and wake), with one 0.15 s follow-up, to hide on other Spaces and re-show when the herd Space is active again; the scrim gets the same follow-up. The dock also stops drop detection while the manager's Space is not active. Event-driven, no new timers.
+
 ## 0.6.27 - 2026-10-14
 
 ### Changed
