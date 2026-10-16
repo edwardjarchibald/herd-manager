@@ -51,8 +51,8 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "manager_width":       (520,   None, "manager column width (px) in dock-off mode"),
     "manager_font_max":    (16,    None, "dock mode: largest manager font size tried (shrinks until all sessions fit)"),
     "manager_font_min":    (9,     None, "dock mode: smallest manager font size allowed"),
-    "working_color_256":   (37,    None, "manager row background for sessions herdr reports working/busy (dark text), xterm-256 colour index (37 = #00afaf teal); a selected row keeps it (selection = white bracket frame)"),
-    "blocked_color_256":   (208,   None, "manager row background for sessions herdr reports blocked (dark text), xterm-256 colour index (208 = #ff8700 orange); a selected row keeps it (selection = white bracket frame)"),
+    "working_color_256":   (37,    None, "manager row background for sessions herdr reports working/busy (dark text), xterm-256 colour index (37 = #00afaf teal); a selected row keeps it (selection = underline across the whole row text)"),
+    "blocked_color_256":   (208,   None, "manager row background for sessions herdr reports blocked (dark text), xterm-256 colour index (208 = #ff8700 orange); a selected row keeps it (selection = underline across the whole row text)"),
     "outline":             (True,  None, "draw the outline around the selected session's window (env HERD_NO_OUTLINE=1 disables)"),
     "outline_rgb":         ("255 255 255", "HERD_OUTLINE_RGB", "colour 'r g b' (0-255) of the SELECTED/zoomed session's window outline; default white. A blocked (orange) or busy (teal) selected window shows its state colour and this white ring just outside it"),
     "outline_px":          (6,     "HERD_OUTLINE_PX", "outline thickness in px"),
@@ -1648,7 +1648,6 @@ def manager():
             c256_ = curses.COLORS >= 256                                    # 0.6.29: no blue, no red anywhere
             curses.init_pair(9, curses.COLOR_BLACK, WORKING_256 if c256_ else curses.COLOR_CYAN)     # busy row: dark on teal
             curses.init_pair(10, curses.COLOR_BLACK, BLOCKED_256 if c256_ else curses.COLOR_YELLOW)  # blocked row: dark on orange
-            curses.init_pair(11, curses.COLOR_BLACK, curses.COLOR_WHITE)                              # selection: white bracket frame
             curses.init_pair(5, BLOCKED_256 if c256_ else curses.COLOR_YELLOW, -1)                   # "!" error messages: orange text
         except curses.error: pass
         C = lambda i: curses.color_pair(i)
@@ -1711,7 +1710,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.29 (event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.30 (event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
         _herd_log(f"colours: blocked row={BLOCKED_256} outline={cfg('blocked_outline_rgb')!r}; busy row={WORKING_256} outline={cfg('working_outline_rgb')!r}; selection outline={cfg('outline_rgb')!r}")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
@@ -1899,14 +1898,16 @@ def manager():
                 sub = f"  {r['cwd']}"
                 sub = sub[:max(0, W - 1 - len(line))]
                 st_ = str(att_on.get(r["name"]) or "").split(":")[0] if cfg_hl else ""
+                ul = curses.A_UNDERLINE if idx == sel else 0               # 0.6.30: selection = underline across the whole row text incl. padding (no brackets); colour untouched
                 if st_ == "blocked":                                      # whole row dark on orange (also when selected)
-                    fput(y, 0, (line + sub).ljust(W - 1), C(10) | curses.A_BOLD)
+                    fput(y, 0, (line + sub).ljust(W - 1), C(10) | curses.A_BOLD | ul)
                 elif cfg_hl and r.get("agent") == "working":               # whole row dark on teal (also when selected)
-                    fput(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD)
+                    fput(y, 0, (line + sub).ljust(W - 1), C(9) | curses.A_BOLD | ul)
+                elif idx == sel:                                           # selected done/idle: default (white) text so the underline is white; only the mark stays green
+                    fput(y, 0, (line + sub).ljust(W - 1), curses.A_BOLD | ul)
+                    if r["window"]: fput(y, 1, mark, C(2) | curses.A_BOLD | ul)
                 else:                                                      # done/idle: plain (green name, gray row)
                     fput(y, 0, line, attr); fput(y, len(line), sub, curses.A_DIM)
-                if idx == sel and W > 3:                                   # 0.6.29: selection = white bracket frame, colour untouched
-                    fput(y, 0, "[", C(11) | curses.A_BOLD); fput(y, W - 2, "]", C(11) | curses.A_BOLD)
             py = H - 1                                   # the one bottom line
             pfx = " > "
             fput(py - 1, 0, "\u2500" * (W - 1), curses.A_DIM)

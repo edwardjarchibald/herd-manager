@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.30 - 2026-10-16
+
+### Changed
+- Manager list: the selected row is no longer marked with white `[` `]` brackets; it is marked with an underline (curses A_UNDERLINE) across all of the row's text including the padding. The row keeps its state colour (orange blocked / teal busy / default done/idle). Terminal.app (and curses) cannot colour an underline separately from the text, so on blocked/busy rows the underline is dark (follows the dark text, clearly visible on the orange/teal background, bold kept); a selected done/idle row is drawn in the default (white) text colour, with only the open-window mark green, so its underline is white. Window outlines unchanged (white selected outline stays).
+- Config `_doc` text for `working_color_256` / `blocked_color_256` updated (selection = underline).
+
 ## 0.6.29 - 2026-10-16
 
 ### Changed

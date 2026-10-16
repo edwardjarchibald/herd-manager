@@ -144,7 +144,8 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 The manager reloads itself when `bin/herd` changes, keeping the selection.
 
 Colours: blocked = orange, busy = teal, done/idle = plain; there is no blue and no red. The selected row is
-marked by a white `[ ]` bracket frame at both ends of the row and keeps its state colour. The selected (or
+marked by an underline across all of the row's text (padding included) and keeps its state colour (a selected done/idle row
+is drawn in the default text colour so its underline is white; on blocked/busy rows the underline follows the dark text colour, because Terminal.app cannot colour an underline separately). The selected (or
 zoomed) session's own Terminal window gets a 6px white outline; if that session is blocked its window shows the
 orange outline, if busy the teal one, with the white selection ring just outside it (a zoomed window always has
 an outline). Other blocked windows keep their orange outline. The outlines are drawn hugging the window's rounded corners (16pt on macOS 26, 10pt before;
