@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.31 - 2026-10-17
+
+### Fixed
+- Keyboard focus was intermittently pulled into the manager window while typing in a session terminal (the manager's curses UI then took the keystrokes as commands). Cause: every herd-initiated ordering call ended with Terminal `set index of window <manager> to 1` (`refocus_manager`, `raise_behind_manager`, `Outline.follow(force)`, `dock_raise`'s manager step), and that makes the manager Terminal's KEY window; when Terminal is the frontmost app and a session window has focus, focus moves to the manager. The select-zoom path (`zoom_to(.., focus=False)` -> `post_zoom` -> `refocus_manager`) ran whenever `rows[sel]["name"]` differed from the last zoomed name, and the selection was a plain row INDEX: any refresh that inserted/removed/renamed a row (new/killed/renamed session, auto-rename on cwd/branch change, a status event for an unknown pane forcing a full snapshot) shifted `rows[sel]` to another session, which was treated as a user selection (re-zoom + manager raise) without any keypress. A late debounced click right after a double-click focus did the same thing (focus.log: `double-click ... focus_on_zoom OK` followed ~1 s later by `zoom ... select-debounced-already-zoomed`, then `verify ... lost focus (front=Terminal/655)`).
+- New focus guard (manager process only): all Terminal-stack raises go through `_raise_in_terminal()`, which reads Terminal's frontmost flag and front window id in the same osascript and SKIPS the raise when Terminal is frontmost and its front window is not the manager. Manager key commands (K/O/N/A/H/F/Z) and the N/O settle zoom run under `user_forced()` and are exempt. `dock_raise` (activates the docked app, then Terminal) is guarded the same way.
+- The manager's selection now follows the session (workspace id, else name) across refreshes. If the selected session disappears the selection is adopted silently (no zoom, no focus); a rename of the selected session carries the zoom state along. Only an actual click/arrow/key selection can trigger select-zoom.
+
+### Added
+- focus.log: every herd-initiated ordering/focus call is logged with reason, caller chain and the state it saw (`raise[reason] wids=.. before(front_win/term_frontmost)=.. -> DONE|SKIP caller=a:12<b:34`, `focus_window`, `dock_raise` / `dock_raise SKIP`, `keep_front: frontmost app changed .. re-activating`, `focus_on_zoom .. before(term_frontmost/front_win)=..`, `selection follows ..`). If focus moves to the manager and focus.log shows no `raise[..] -> DONE` / `focus_*` line at that moment, the move did not come from herd.
+- No helper (herd-outline/scrim/dock) change: their panels are borderless `.nonactivatingPanel`, ignore mouse events, never call activate/makeKey; they only `order`/`orderFrontRegardless`.
+
 ## 0.6.30 - 2026-10-16
 
 ### Changed

@@ -662,14 +662,72 @@ def _win_alive(wid):
                        capture_output=True, text=True)
     return p.stdout.strip() == "true"
 
+# 0.6.31 focus guard (manager process only). Terminal.app's `set index of window .. to 1` on the manager
+# makes the manager Terminal's KEY window; when Terminal is the frontmost app and the user is typing in a
+# session window, that moves keyboard focus to the manager (its curses UI then eats the keystrokes).
+# Every herd-initiated ordering call therefore re-checks Terminal's front window first and SKIPS the
+# raise when Terminal is frontmost and the front window is not the manager, unless the call comes
+# straight from a manager key command (user_forced()). All calls are logged with reason + caller.
+_FOCUS_GUARD = {"on": False, "force": 0}
+
+import contextlib
+@contextlib.contextmanager
+def user_forced():
+    """A manager key command (K/O/N/H/F/Z/...) or its follow-up may reorder Terminal's stack freely."""
+    _FOCUS_GUARD["force"] += 1
+    try: yield
+    finally: _FOCUS_GUARD["force"] -= 1
+
+def _guarded():
+    return bool(_FOCUS_GUARD["on"] and not _FOCUS_GUARD["force"])
+
+def _caller(skip=2, n=3):
+    """Short call chain `fn:line<fn:line<..` for focus.log."""
+    try:
+        f, out = sys._getframe(skip), []
+        while f is not None and len(out) < n: out.append(f"{f.f_code.co_name}:{f.f_lineno}"); f = f.f_back
+        return "<".join(out)
+    except Exception: return "?"
+
+def _term_state():
+    """(Terminal frontmost?, id of Terminal's front window) in ONE read-only osascript; ('?', '?') on failure."""
+    r = subprocess.run(["osascript", "-e", 'tell application "Terminal" to if it is running then return ((frontmost as text) & " " & (id of front window as text))'],
+                       capture_output=True, text=True)
+    a = r.stdout.split()
+    return (a[0], a[1]) if len(a) == 2 else ("?", "?")
+
+def _raise_in_terminal(wids, reason):
+    """Set `wids` (in order) to Terminal index 1 WITHOUT activating Terminal. Guarded + logged (0.6.31).
+    The manager's own window is expected last in `wids`, so it ends up key. Returns True if it ran."""
+    m = _locked(lambda d: d.get(MGR))
+    mid = int(m["wid"]) if m else 0
+    guard = "true" if (_guarded() and mid) else "false"
+    lines = "\n".join(f"    set index of window id {int(w)} to 1" for w in wids)
+    script = f'''tell application "Terminal"
+  if it is not running then return "norun"
+  set fw to 0
+  try
+    set fw to id of front window
+  end try
+  set tf to frontmost
+  if {guard} and tf and fw is not {mid} then return "SKIP " & fw & " " & tf
+{lines}
+  return "DONE " & fw & " " & tf
+end tell'''
+    with keep_front():
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    out = r.stdout.strip() or ("err " + r.stderr.strip()[:80])
+    _herd_log(f"raise[{reason}] wids={list(wids)} mgr={mid} guard={guard} before(front_win/term_frontmost)={out.split(' ', 1)[-1]} -> {out.split(' ')[0]} caller={_caller(3)}")
+    return out.startswith("DONE")
+
 def focus_window(wid):
     """Bring ONE recorded herd window to the front."""
+    _herd_log(f"focus_window wid={wid} (activate Terminal) caller={_caller()}")
     subprocess.run(["osascript", "-e", f'''tell application "Terminal"
   set index of window id {int(wid)} to 1
   activate
 end tell'''], capture_output=True)
 
-import contextlib
 @contextlib.contextmanager
 def keep_front():
     """Safety net: whatever runs inside must not change the frontmost app. If it did, hand the
@@ -677,7 +735,9 @@ def keep_front():
     before = frontmost_pid()
     try: yield
     finally:
-        if before and frontmost_pid() != before:
+        now = frontmost_pid() if before else ""
+        if before and now != before:
+            _herd_log(f"keep_front: frontmost app changed {before} -> {now}, re-activating {before} caller={_caller(3)}")
             subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_REFRONT, before], capture_output=True)
 
 def refocus_manager():
@@ -685,9 +745,7 @@ def refocus_manager():
     (It used to call focus_window = `activate`, which pulled Terminal over the frontmost app.)"""
     r = _locked(lambda d: d.get(MGR))
     if not r: return
-    with keep_front():
-        subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then set index of window id {int(r["wid"])} to 1'],
-                       capture_output=True)
+    _raise_in_terminal([r["wid"]], "refocus_manager")
 
 def close_window(wid):
     subprocess.run(["osascript", "-e", f'tell application "Terminal" to close window id {int(wid)} saving no'], capture_output=True)
@@ -1002,7 +1060,7 @@ def sessions():
             cmd = prog_label(p)
             if p.get("agent") and p.get("agent_status"): cmd += f" ({p['agent_status']})"
         label = w["label"]
-        rows.append({"name": label, "herd": True, "pane": p.get("pane_id"), "prog": prog_label(p) if p else "", "is_agent": bool(p.get("agent")),
+        rows.append({"name": label, "wsid": w["workspace_id"], "herd": True, "pane": p.get("pane_id"), "prog": prog_label(p) if p else "", "is_agent": bool(p.get("agent")),
                      "window": label in recs, "cwd": detail_cwd(p.get("foreground_cwd") or p.get("cwd", "")),
                      "cmd": cmd, "agent": p.get("agent_status", ""),
                      "att": f"{p['agent_status']}:{seq.get(p.get('terminal_id'))}" if p.get("agent") and p.get("agent_status") in ("done", "blocked") else None})
@@ -1403,11 +1461,16 @@ def dock_raise():
     term = _terminal_pid()
     if not term or frontmost_pid() != term: return
     if subprocess.run(["kill", "-0", str(d["pid"])], capture_output=True).returncode: return
+    m0 = _locked(lambda x: x.get(MGR))
+    if _guarded() and m0:                      # 0.6.31: activating the docked app + re-activating Terminal = a focus flip; never while a session window has focus
+        tf, fw = _term_state()
+        if tf != "?" and fw != str(int(m0["wid"])):
+            _herd_log(f"dock_raise SKIP pid={d['pid']}: Terminal front window {fw} is not the manager (frontmost={tf}) caller={_caller()}"); return
+    _herd_log(f"dock_raise pid={d['pid']} (activates docked app, then Terminal) caller={_caller()}")
     subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, str(d["pid"])], capture_output=True)
     m = _locked(lambda x: x.get(MGR))
     if m: subprocess.run(["osascript", "-e", f'tell application "Terminal" to if it is running then set index of window id {int(m["wid"])} to 1'], capture_output=True)
     subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_ACT_KEY, term], capture_output=True)
-    _herd_log(f"dock_raise pid={d['pid']}")
 
 def focus_zoomed(name, reason):
     """0.6.22: make the zoomed herd window (recorded wid only) Terminal's key/main window and Terminal
@@ -1415,6 +1478,7 @@ def focus_zoomed(name, reason):
     r = recorded(name)
     if not r or not r.get("zoom") or not r.get("wid"): _herd_log(f"focus_on_zoom skip {name} ({reason}): no zoomed herd window"); return False
     wid = int(r["wid"])
+    tf0, fw0 = _term_state()
     p = subprocess.run(["osascript", "-e", f'''tell application "Terminal"
   set index of window id {wid} to 1
   activate
@@ -1422,7 +1486,7 @@ def focus_zoomed(name, reason):
   return id of front window
 end tell'''], capture_output=True, text=True)
     fw = p.stdout.strip()
-    _herd_log(f"focus_on_zoom {name} wid={wid} reason={reason} front_wid={fw or '?'}{' OK' if fw == str(wid) else ' MISMATCH ' + p.stderr.strip()[:120]}")
+    _herd_log(f"focus_on_zoom {name} wid={wid} reason={reason} before(term_frontmost/front_win)={tf0}/{fw0} front_wid={fw or '?'}{' OK' if fw == str(wid) else ' MISMATCH ' + p.stderr.strip()[:120]} caller={_caller()}")
     __import__("threading").Thread(target=_focus_verify, args=(name, wid, reason), daemon=True).start()
     return fw == str(wid)
 
@@ -1482,11 +1546,7 @@ def raise_behind_manager(wid):
     front/key window: set index 1 on the target, then on the manager (they don't overlap when tiled).
     Doesn't activate Terminal, so windows of other apps that are in front stay in front."""
     m = _locked(lambda d: d.get(MGR))
-    lines = [f"  set index of window id {int(wid)} to 1"]
-    if m: lines.append(f"  set index of window id {int(m['wid'])} to 1")
-    with keep_front():
-        subprocess.run(["osascript", "-e", 'tell application "Terminal"\n  if it is running then\n' + "\n".join(lines) + "\n  end if\nend tell"],
-                       capture_output=True)
+    _raise_in_terminal([wid] + ([m["wid"]] if m else []), "raise_behind_manager")
 
 JXA_APPS = """ObjC.import('AppKit'); JSON.stringify(ObjC.unwrap($.NSWorkspace.sharedWorkspace.runningApplications).map(function(a){
   return [ObjC.unwrap(a.localizedName) || '', a.processIdentifier, Number(a.activationPolicy), ObjC.unwrap(a.bundleIdentifier) || '']; }))"""
@@ -1680,6 +1740,7 @@ def manager():
         scrim = Scrim() if not os.environ.get("HERD_TEST_SANDBOX") else None
         dock_helper = start_dock() if not os.environ.get("HERD_TEST_SANDBOX") else None   # noqa: F841 (pipe keeps it alive)
         sel_seen = [None]
+        if not os.environ.get("HERD_TEST_SANDBOX"): _FOCUS_GUARD["on"] = True      # 0.6.31: see _raise_in_terminal()
         CTRL_SEND = {3: "ctrl+c", 4: "ctrl+d", 12: "ctrl+l", 21: "ctrl+u", 23: "ctrl+w", 26: "ctrl+z", 18: "ctrl+r"}
         CSI_MAP = {"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
                    "H": curses.KEY_HOME, "F": curses.KEY_END, "1~": curses.KEY_HOME, "7~": curses.KEY_HOME,
@@ -1710,7 +1771,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.30 (event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.31 (focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
         _herd_log(f"colours: blocked row={BLOCKED_256} outline={cfg('blocked_outline_rgb')!r}; busy row={WORKING_256} outline={cfg('working_outline_rgb')!r}; selection outline={cfg('outline_rgb')!r}")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
@@ -1770,9 +1831,26 @@ def manager():
             if last == 0 or hev.take():                                 # structural herdr change, (re)connect, or local action
                 hev.take_status()                                       # superseded by this snapshot
                 try:
+                    prev_ = rows[sel] if rows and 0 <= sel < len(rows) else None
                     rows = sessions()
                     if want_sel[0]:
                         sel = next((i for i, r in enumerate(rows) if r["name"] == want_sel[0]), sel); want_sel[0] = None
+                    elif prev_:
+                        # 0.6.31: the selection follows the SESSION (workspace id, else name) across refreshes. A row
+                        # inserted/removed/renamed elsewhere used to shift rows[sel] to a different session, which the
+                        # select-zoom logic took for a user selection (zoom + manager raise = focus theft).
+                        j_ = next((i for i, r in enumerate(rows) if prev_.get("wsid") and r.get("wsid") == prev_["wsid"]), None)
+                        if j_ is None: j_ = next((i for i, r in enumerate(rows) if r["name"] == prev_["name"]), None)
+                        if j_ is not None:
+                            if rows[j_]["name"] != prev_["name"]:
+                                _herd_log(f"selection follows renamed session {prev_['name']} -> {rows[j_]['name']} (no zoom)")
+                                if zs["name"] == prev_["name"]: zs["name"] = rows[j_]["name"]
+                            if j_ != sel: _herd_log(f"selection follows {prev_['name']} index {sel} -> {j_} (rows changed, no zoom)")
+                            sel = j_
+                        elif rows:
+                            sel = max(0, min(sel, len(rows) - 1))
+                            _herd_log(f"selected session {prev_['name']} is gone; selection now {rows[sel]['name']} (adopted, no zoom, no focus)")
+                            zs.update(name=rows[sel]["name"], since=time.time(), done=True, will=False)
                 except SystemExit as e: msg = f"! {e}"
                 except Exception as e: msg = f"! {e}"
                 last = time.time()
@@ -1839,7 +1917,8 @@ def manager():
                         why_ = nz.get("why", "new"); _herd_log(f"{why_}: window for {nm_} settled, zooming")
                         if cfg("zoom_on_open" if why_ == "open" else "zoom_on_new") and not hidden[0] and not gf["behind"]:
                             try:
-                                if zoom_to(nm_, outline, why_): sel_seen[0] = nm_; last = 0
+                                with user_forced():
+                                    if zoom_to(nm_, outline, why_): sel_seen[0] = nm_; last = 0
                             except Exception as e: msg = f"! {e}"
                         zs.update(name=nm_, since=time.time(), done=True, will=False); zs["scrim"] = True
                 elif time.time() - nz["t"] > 15: _herd_log(f"{nz.get('why')}: no window for {nz['name']} after 15 s, giving up"); nz["name"] = None       # window never showed up: give up
@@ -2039,6 +2118,7 @@ def manager():
             if ch and time.time() < esc_until[0] and ch.isalpha(): continue   # stray keys right after Esc
             cur = rows[sel]["name"] if rows else None
             try:
+              with user_forced():                                          # 0.6.31: manager key commands may reorder Terminal's stack
                 if ch == "Q": return
                 elif ch == "?": show_help[0] = not show_help[0]
                 elif ch == "H":
