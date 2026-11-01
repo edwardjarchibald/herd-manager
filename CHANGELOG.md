@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.32 - 2026-11-01
+
+### Fixed
+- Dock: dropping a window into the dock often did nothing. herd-dock treated every on-screen layer-0 window of any process (except itself and Terminal) as a drag candidate, and the last window that moved while the mouse button was down won. On macOS 26 the system text-cursor indicator (CursorUIViewService, a background process) has layer-0 windows that follow the text cursor, including while its window is being dragged, and herd's own herd-outline/herd-scrim overlays are layer-0 windows too. When one of those won, the drop looked up an Accessibility window that does not exist and was silently discarded (the outline still showed "docking activated"). Candidates are now only windows of `.regular` activation-policy apps other than Terminal, and only the frontmost app's windows (dragging a window by its title bar activates its app; a Cmd-drag of a background window is not picked up).
+
+### Added
+- `~/.cache/herd/dock.log` (herd-dock's stderr, set up in `start_dock()`; rotated to `dock.log.1` at 500 KB when the manager starts the helper): one line at helper start, and one line per dock attempt (`dock pid=.. bundle=.. wid=..: ok` / `fitted with AX errors pos=.. size=..` / `FAILED, no matching AX window` / `FAILED, Accessibility not granted`) and per undock (`window left the dock` / `app gone`). `axWindow()` logs the AXError when reading the app's windows fails or no window matches; `fit()` reports failing AXUIElementSetAttributeValue codes. Nothing is logged per tick or while dragging.
+
 ## 0.6.31 - 2026-10-17
 
 ### Fixed

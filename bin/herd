@@ -1216,7 +1216,10 @@ def start_dock():
         if not os.path.exists(binp) or os.path.getmtime(binp) < os.path.getmtime(src):
             os.makedirs(os.path.dirname(binp), exist_ok=True)
             if subprocess.run(["swiftc", "-O", "-o", binp, src], capture_output=True, timeout=180).returncode: return None
-        return subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log = os.path.expanduser("~/.cache/herd/dock.log")                    # 0.6.32: one line per dock/undock attempt
+        if os.path.exists(log) and os.path.getsize(log) > 500_000: os.replace(log, log + ".1")
+        with open(log, "a") as err:
+            return subprocess.Popen([binp], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
     except (OSError, subprocess.SubprocessError): return None
 
 OUTLINE_LOG = os.path.expanduser("~/.cache/herd/outline.log")
@@ -1771,7 +1774,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.31 (focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.32 (dock: regular frontmost-app windows only, dock.log; focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
         _herd_log(f"colours: blocked row={BLOCKED_256} outline={cfg('blocked_outline_rgb')!r}; busy row={WORKING_256} outline={cfg('working_outline_rgb')!r}; selection outline={cfg('outline_rgb')!r}")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]

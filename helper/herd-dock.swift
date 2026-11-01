@@ -3,6 +3,7 @@
 //   reads  ~/.config/herd/dock-area.json  {"area":[l,t,r,b]}  (written by `herd tile`; absent = dock off)
 //   writes ~/.config/herd/dock.json       {"pid":..,"bundle":"..","wid":..} when a window is docked, {} when empty,
 //                                         plus "error" when Accessibility is missing.
+//   stderr: one short line per dock/undock attempt (bin/herd sends it to ~/.cache/herd/dock.log) (0.6.32)
 // Coordinates are top-left of the main screen (same as Terminal bounds / CGWindowList).
 // It READS window bounds from CGWindowList (no titles, no screen content) to notice a window being dragged
 // with the mouse button down. It only ever MOVES/RESIZES the single window dropped into the area (via
@@ -15,6 +16,13 @@ let areaFile = cfg + "/dock-area.json", stateFile = cfg + "/dock.json"
 let myPID = ProcessInfo.processInfo.processIdentifier
 let termBundle = "com.apple.Terminal"
 let cyan = NSColor(srgbRed: 51 / 255, green: 187 / 255, blue: 200 / 255, alpha: 1)
+
+/// 0.6.32: one line to stderr (dock.log). Only called per dock/undock attempt, never per tick.
+let logFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"; return f }()
+func dlog(_ s: String) {
+    FileHandle.standardError.write("\(logFmt.string(from: Date())) dock[\(myPID)] \(s)\n".data(using: .utf8)!)
+}
+func bundleOf(_ pid: pid_t) -> String { NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?" }
 
 final class DockView: NSView {
     var bright = false
@@ -91,7 +99,10 @@ func center(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
 func axWindow(_ pid: pid_t, _ frame: CGRect) -> AXUIElement? {
     let appEl = AXUIElementCreateApplication(pid)
     var v: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &v) == .success, let wins = v as? [AXUIElement] else { return nil }
+    let err = AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &v)
+    guard err == .success, let wins = v as? [AXUIElement] else {
+        dlog("axWindow pid=\(pid) bundle=\(bundleOf(pid)): AXWindows failed (AXError \(err.rawValue))"); return nil
+    }
     for w in wins {
         var p: CFTypeRef?, s: CFTypeRef?
         var pt = CGPoint.zero, sz = CGSize.zero
@@ -99,13 +110,17 @@ func axWindow(_ pid: pid_t, _ frame: CGRect) -> AXUIElement? {
         if AXUIElementCopyAttributeValue(w, kAXSizeAttribute as CFString, &s) == .success { AXValueGetValue(s as! AXValue, .cgSize, &sz) }
         if abs(pt.x - frame.minX) <= 6 && abs(pt.y - frame.minY) <= 6 && abs(sz.width - frame.width) <= 8 && abs(sz.height - frame.height) <= 8 { return w }
     }
+    dlog("axWindow pid=\(pid) bundle=\(bundleOf(pid)): no AX window matches \(frame) (\(wins.count) AX windows)")
     return nil
 }
-func fit(_ w: AXUIElement, _ a: CGRect) {
-    var pt = a.origin, sz = a.size
-    if let pv = AXValueCreate(.cgPoint, &pt) { AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, pv) }
-    if let sv = AXValueCreate(.cgSize, &sz) { AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString, sv) }
-    if let pv = AXValueCreate(.cgPoint, &pt) { AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, pv) }  // again after size clamps
+/// Move/resize `w` to `a`. Returns "" on success, else the failing AX calls with their AXError codes.
+func fit(_ w: AXUIElement, _ a: CGRect) -> String {
+    var pt = a.origin, sz = a.size, errs: [String] = []
+    func chk(_ what: String, _ e: AXError) { if e != .success { errs.append("\(what)=\(e.rawValue)") } }
+    if let pv = AXValueCreate(.cgPoint, &pt) { chk("pos", AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, pv)) }
+    if let sv = AXValueCreate(.cgSize, &sz) { chk("size", AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString, sv)) }
+    if let pv = AXValueCreate(.cgPoint, &pt) { chk("pos2", AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, pv)) }  // again after size clamps
+    return errs.joined(separator: " ")
 }
 
 func tick() {
@@ -118,20 +133,28 @@ func tick() {
     for w in info {
         guard (w[kCGWindowLayer as String] as? Int) == 0, let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != myPID,
               let num = w[kCGWindowNumber as String] as? CGWindowID, let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
-        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == termBundle { continue }
+        // 0.6.32: only real app windows. Skips Terminal, herd's own overlays (herd-outline/scrim: accessory) and
+        // system UI such as macOS 26's CursorUIViewService text-cursor indicator (background), whose layer-0
+        // windows follow the text cursor (also while its window is dragged) and used to steal the drop.
+        guard let ra = NSRunningApplication(processIdentifier: pid), ra.activationPolicy == .regular,
+              ra.bundleIdentifier != termBundle else { continue }
         now[num] = (CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0), pid)
     }
     // docked window: still there and still inside?
     if let dw = docked["wid"] as? Int {
         let id = CGWindowID(dw)
         if let (r, _) = now[id] {
-            if !a.contains(center(r)) { save([:]) }
-        } else if NSRunningApplication(processIdentifier: pid_t(docked["pid"] as? Int ?? 0)) == nil { save([:]) }
+            if !a.contains(center(r)) { dlog("undock pid=\(docked["pid"] ?? "?") bundle=\(docked["bundle"] ?? "?") wid=\(dw): window left the dock"); save([:]) }
+        } else if NSRunningApplication(processIdentifier: pid_t(docked["pid"] as? Int ?? 0)) == nil {
+            dlog("undock pid=\(docked["pid"] ?? "?") bundle=\(docked["bundle"] ?? "?") wid=\(dw): app gone"); save([:])
+        }
     }
     let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
-    // a window being dragged = its frame changed since the last tick while the button is down
+    // a window being dragged = its frame changed since the last tick while the button is down.
+    // 0.6.32: only the frontmost app's windows (dragging a window by its title bar activates its app).
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
     if mouseDown {
-        for (id, (r, pid)) in now where Int(id) != (docked["wid"] as? Int ?? -1) {
+        for (id, (r, pid)) in now where pid == front && Int(id) != (docked["wid"] as? Int ?? -1) {
             if let old = last[id], old != r { cand = id; candPID = pid; candSince = Date(); candFrame = r }
         }
     }
@@ -142,12 +165,14 @@ func tick() {
         if a.contains(center(r)) {
             mode = 2
             if !mouseDown && Date().timeIntervalSince(candSince) >= 0.35 {
-                if !AXIsProcessTrusted() { save(["error": "accessibility"]); cand = nil }
+                let who = "pid=\(candPID) bundle=\(bundleOf(candPID)) wid=\(c)"
+                if !AXIsProcessTrusted() { dlog("dock \(who): FAILED, Accessibility not granted (responsible app, normally Terminal)"); save(["error": "accessibility"]); cand = nil }
                 else if let w = axWindow(candPID, r) {
-                    fit(w, a)
+                    let errs = fit(w, a)
+                    dlog("dock \(who): " + (errs.isEmpty ? "ok" : "fitted with AX errors \(errs)"))
                     save(["pid": Int(candPID), "bundle": NSRunningApplication(processIdentifier: candPID)?.bundleIdentifier ?? "", "wid": Int(c)])
                     cand = nil; mode = 0
-                } else { cand = nil }
+                } else { dlog("dock \(who): FAILED, no matching AX window"); cand = nil }
             }
         } else if !mouseDown { cand = nil }
     } else { cand = nil }
@@ -157,6 +182,7 @@ func tick() {
 }
 
 if let d = FileManager.default.contents(atPath: stateFile), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { docked = j }
+dlog("start (state \(docked.isEmpty ? "empty" : "\(docked)"), AX trusted=\(AXIsProcessTrusted()))")
 DispatchQueue.global().async {
     while readLine() != nil {}
     DispatchQueue.main.async { exit(0) }

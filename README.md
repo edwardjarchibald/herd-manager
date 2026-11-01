@@ -88,6 +88,7 @@ largest font (Monaco, up to 16) that fits all of them plus the divider and broad
 - Only the one window you drop in is ever moved. Herd reads other windows' bounds only to notice a drag.
 - Resizing needs Accessibility for Terminal (System Settings > Privacy & Security > Accessibility).
 - State is kept in `~/.config/herd/dock.json` and the area in `~/.config/herd/dock-area.json` (written by `herd tile`).
+- Only windows of regular apps (not Terminal) dragged while their app is frontmost count. Every dock/undock attempt is logged to `~/.cache/herd/dock.log`.
 
 ### Configuration
 
