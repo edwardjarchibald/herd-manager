@@ -133,6 +133,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 | `O` | Toggle: open the session's window (tiled, without activating Terminal; the manager keeps focus), or, if it has one, detach and close it (the session keeps running) |
 | `N` | New session and window (also without activating Terminal) |
 | `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
+| `R` | Rename the selected session: its row turns into a text field prefilled with the current name. Enter saves, Esc cancels; while the field is open every key is text (no commands). The name becomes the session's display name everywhere herd shows it (manager row, window title, `herd ls`, commands that take a name) and sticks like `herd rename`. An empty name returns the session to its automatic name. Editing: ←/→, Home/End (Ctrl-A/E), Backspace/Delete, Ctrl-U/Ctrl-K |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
 | `?` | Toggle the help overlay (Esc also closes it) |
@@ -168,7 +169,11 @@ Names follow each session's working directory automatically (the manager recheck
   (origin remote name, else the main worktree folder); override it in `~/.config/herd/prefixes.json`
   (`{"MyRepo": "mr"}`).
 - Everything else: `dev-<N>` (lowest free number). A dev-N name stays stable; it isn't renumbered.
-- Manual names (`herd new <name>`, `herd rename`) stick until `herd rename --auto <name>`.
+- Manual names (`herd new <name>`, `herd rename`, `R` in the manager) stick until `herd rename --auto <name>`
+  (or `R` with an empty name). A name is the session's herdr workspace label, so herdr itself keeps it
+  across manager restarts; `~/.config/herd/names.json` (keyed by herdr workspace id) only marks it manual
+  so automatic naming leaves it alone. Names can contain spaces but not quotes, `$`, `` ` ``, backslashes
+  or control characters (max 120 characters).
 
 The detail line in the manager (and the CWD column of `herd ls`) shows `<repo>/<branch>` inside git
 (main repo folder name, also for worktrees; short hash when detached), else the cwd with `~`.

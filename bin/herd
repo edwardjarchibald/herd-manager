@@ -7,6 +7,8 @@ Name = herdr workspace label (stored in herdr itself; no side file).
   herd open <name>  open a Terminal.app window titled <name> running `herdr terminal attach <id>`
   herd kill <name>  close the herdr workspace
   herd id <name>    print pane id (for herdr pane read/run)
+  herd rename <name> <new>  manual display name (sticks; auto naming skips it)
+  herd rename --auto <name> back to the automatic name
   herd tile         retile herd-created Terminal windows (even grid) on the newest one's display
   herd untile       placeholder (no-op)
   herd attach <name> (used inside herd windows) attach + clean up/retile on exit
@@ -1024,10 +1026,27 @@ def paste_session(name, text=None):
 def rename(old, new_):
     """Manual rename: the name sticks (auto naming skips it) until `herd rename --auto <name>`."""
     if not NAME_RE.match(new_): raise ValueError("bad name")
-    if new_ in {w["label"] for w in workspaces()}: raise ValueError("name exists")
     w, _ = find(old)
+    return rename_ws(w["workspace_id"], new_)[0]
+
+def rename_ws(wsid, new_):
+    """Display name of the session with herdr workspace id `wsid` (manager R, `herd rename`). The name IS the
+    herdr workspace label (herdr keeps it across manager restarts); names.json marks it manual so auto naming
+    leaves it alone, and _relabel() carries the window record/title along. Empty = back to the automatic
+    name. Returns (name, 'renamed' | 'reset' | 'unchanged')."""
+    new_ = (new_ or "").strip()
+    ws = workspaces()
+    w = next((x for x in ws if x["workspace_id"] == wsid), None)
+    if w is None: raise ValueError("session is gone")
+    if not new_:
+        _meta(lambda d: d.pop(wsid, None))
+        return dict(auto_names()).get(w["label"], w["label"]), "reset"
+    if new_ == w["label"]: return new_, "unchanged"
+    if not NAME_RE.match(new_): raise ValueError("name must not contain quotes, $, `, backslash or control characters")
+    if new_ in {x["label"] for x in ws}: raise ValueError(f"{new_!r} already exists")
     _relabel(w, new_)
-    _meta(lambda d: d.__setitem__(w["workspace_id"], {"manual": True, "label": new_}))
+    _meta(lambda d: d.__setitem__(wsid, {"manual": True, "label": new_}))
+    return new_, "renamed"
 
 def rename_auto(name):
     w, _ = find(name)
@@ -1679,8 +1698,15 @@ def manager():
         log = os.environ["HERD_TEST_SANDBOX"]
         n = int(os.environ.get("HERD_TEST_ROWS", "6"))
         g = globals(); sys.argv[0] = "/usr/bin/false"   # N's `herd new` subprocess can't run
-        g["sessions"] = lambda: [{"name": f"fake-{i}", "herd": True, "window": i % 2 == 0, "cwd": "~", "cmd": "-bash", "agent": ""} for i in range(n)]
-        g["attached_names"] = lambda: [f"fake-{i}" for i in range(n) if i % 2 == 0]
+        fake_ = {f"wfake{i}": f"fake-{i}" for i in range(n)}             # workspace id -> name (R renames these)
+        g["sessions"] = lambda: [{"name": fake_[f"wfake{i}"], "wsid": f"wfake{i}", "herd": True, "window": i % 2 == 0, "cwd": "~", "cmd": "-bash", "agent": ""} for i in range(n)]
+        g["attached_names"] = lambda: [fake_[f"wfake{i}"] for i in range(n) if i % 2 == 0]
+        def fake_rename(wsid, new_):
+            open(log, "a").write(f"rename_ws {(wsid, new_)}\n"); new_ = new_.strip()
+            if new_ and new_ != fake_[wsid] and new_ in fake_.values(): raise ValueError(f"{new_!r} already exists")
+            what_ = "reset" if not new_ else "unchanged" if new_ == fake_[wsid] else "renamed"
+            fake_[wsid] = new_ or f"fake-{wsid[5:]}"; return fake_[wsid], what_
+        g["rename_ws"] = fake_rename
         for fn in ("auto_names", "send_raw_all", "send_keys_all", "broadcast", "refocus_manager", "open_", "kill", "killall", "rename", "new", "copy_session", "paste_session", "detach"):
             g[fn] = (lambda fn: lambda *a, **k: (open(log, "a").write(f"{fn} {a}\n"), a[1] if fn in ("broadcast", "send_keys_all", "send_raw_all") and len(a) > 1 else [])[1])(fn)
     def cleanup(*_):
@@ -1774,7 +1800,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.32 (dock: regular frontmost-app windows only, dock.log; focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.33 (R: inline rename field; dock: regular frontmost-app windows only, dock.log; focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
         _herd_log(f"colours: blocked row={BLOCKED_256} outline={cfg('blocked_outline_rgb')!r}; busy row={WORKING_256} outline={cfg('working_outline_rgb')!r}; selection outline={cfg('outline_rgb')!r}")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
@@ -1788,7 +1814,7 @@ def manager():
         nz = {"name": None, "t": 0.0, "seen": 0.0, "why": "new"}                     # N: select + zoom the new session's window
         hidden = [False]                                               # H: session windows hidden
         gf = {"on": False, "stack": [], "behind": False, "t": 0.0, "pt": 0.0}                                 # F: herd group focus state
-        HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom"],
+        HELP = [["(N) new", "(O) open/detach", "(Z) toggle zoom", "(R) rename"],
                 ["(K) kill", "(A) killall", "(Q) quit", "(H) toggle hide", "(?) help", "(F) toggle focus"]]
         def wrap_items(items, width):
             """Greedy pack items (2-space separated) into lines <= width; never truncates."""
@@ -1813,6 +1839,31 @@ def manager():
             try: v = scr.getstr(H - 1, min(len(q), W - 2), 40).decode().strip()
             except Exception: v = ""
             curses.noecho(); curses.curs_set(0); scr.timeout(0); drawn[0] = None; return v
+        ed = {"on": False, "wsid": None, "orig": "", "buf": "", "pos": 0, "raw": b"", "cur": None}   # R: inline rename field
+        def edit_key(k):
+            """One key into the rename field. Returns 'save', 'cancel' or None. Nothing here is ever a command."""
+            b_, p_ = ed["buf"], ed["pos"]
+            if k in (27, 3): return "cancel"                                   # Esc (Ctrl-C too)
+            if k in (10, 13, curses.KEY_ENTER): return "save"
+            if k in (127, 8, curses.KEY_BACKSPACE):
+                if p_: b_, p_ = b_[:p_ - 1] + b_[p_:], p_ - 1
+            elif k == curses.KEY_DC: b_ = b_[:p_] + b_[p_ + 1:]
+            elif k == curses.KEY_LEFT: p_ = max(0, p_ - 1)
+            elif k == curses.KEY_RIGHT: p_ = min(len(b_), p_ + 1)
+            elif k in (curses.KEY_HOME, 1): p_ = 0                             # Home / Ctrl-A
+            elif k in (curses.KEY_END, 5): p_ = len(b_)                        # End / Ctrl-E
+            elif k == 21: b_, p_ = b_[p_:], 0                                  # Ctrl-U: delete to start
+            elif k == 11: b_ = b_[:p_]                                         # Ctrl-K: delete to end
+            elif 32 <= k < 127 or 128 <= k < 256:                              # text (UTF-8 arrives byte by byte)
+                ed["raw"] += bytes([k])
+                try: t_ = ed["raw"].decode("utf-8")
+                except UnicodeDecodeError:
+                    if len(ed["raw"]) >= 4: ed["raw"] = b""
+                    return None
+                ed["raw"] = b""
+                if len(b_) + len(t_) <= 120: b_, p_ = b_[:p_] + t_ + b_[p_:], p_ + len(t_)
+            ed["buf"], ed["pos"] = b_, p_
+            return None
         while True:
             hits_ = set(fw_hit); fw_hit.difference_update(hits_)
             if not fw.ok and time.time() - last_rl[0] > 2: last_rl[0] = time.time(); maybe_reload(); _frames_cache[2] = False   # no kqueue: old stat
@@ -1857,6 +1908,8 @@ def manager():
                 except SystemExit as e: msg = f"! {e}"
                 except Exception as e: msg = f"! {e}"
                 last = time.time()
+                if ed["on"] and not any(r.get("wsid") == ed["wsid"] for r in rows):
+                    ed["on"] = False; msg = f"! rename: {ed['orig']} is gone"
             for pid_, st_, seq_, t_ in hev.take_status():               # agent status: patch the cached row in place (0.6.21)
                 r_ = next((r for r in rows if r.get("pane") and r.get("pane") == pid_), None)
                 if r_ is None: hev.dirty.set(); _wake(); continue       # unknown pane: one full snapshot instead
@@ -1967,6 +2020,7 @@ def manager():
                     else: outline._send("hide")
                     att_outlines.update(orange_, recs_); wk_outlines.update(teal_, recs_)
             frame = []; H, W = scr.getmaxyx()                 # 0.6.21: build the frame, draw only if it changed
+            ed["cur"] = None
             fput = lambda y, x, t, a=0: frame.append((y, x, t, a))
             list_h = max(1, H - 2)                       # 1 row per session; divider + broadcast line at the bottom
             if sel < top: top = sel
@@ -1975,6 +2029,13 @@ def manager():
             for i, r in enumerate(rows[top:top + list_h]):
                 y = i; idx = top + i
                 mark = "\u25cf" if r["window"] else "\u25cb"
+                if ed["on"] and r.get("wsid") == ed["wsid"]:                # R: the row becomes the name field
+                    pre_ = f" {mark} "; fw_ = max(1, W - 1 - len(pre_))
+                    off_ = max(0, ed["pos"] - fw_ + 1); vis_ = ed["buf"][off_:off_ + fw_]
+                    fput(y, 0, pre_, C(2) if r["window"] else 0)
+                    fput(y, len(pre_), vis_.ljust(min(fw_, max(len(vis_) + 1, 20))), C(3) | curses.A_UNDERLINE)
+                    ed["cur"] = (y, len(pre_) + ed["pos"] - off_)
+                    continue
                 attr = (C(2) if r["window"] else curses.A_NORMAL) | (curses.A_BOLD if idx == sel else 0)
                 line = f" {mark} {r['name']}"
                 sub = f"  {r['cwd']}"
@@ -2000,6 +2061,7 @@ def manager():
                 room = W - 1 - len(pfx) - (len(cue) + 1 if W - 1 - len(pfx) > len(cue) + 8 else 0)
                 fput(py, 0, pfx, curses.A_BOLD)
                 if room < W - 1 - len(pfx): fput(py, W - 1 - len(cue), cue, C(3))
+            elif ed["on"]: fput(py, 1, "rename: Enter save, Esc cancel, empty = default name"[:W - 2], C(3))
             elif msg: fput(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
             else: fput(py, 0, pfx + "click for broadcast", curses.A_DIM)
             if show_help[0]:                             # hints overlay: centered box over the list
@@ -2010,7 +2072,7 @@ def manager():
                 for i, l in enumerate(hl):
                     fput(by + 1 + i, bx, "\u2502 " + l.ljust(bw - 4) + " \u2502", C(1) if l and not l.startswith("?") else curses.A_DIM)
                 fput(by + bh - 1, bx, "\u2514" + "\u2500" * (bw - 2) + "\u2518", C(1))
-            sig_ = (H, W, bc["focus"], tuple(frame))
+            sig_ = (H, W, bc["focus"], ed["cur"], tuple(frame))
             t_ev_ = hev.take_t()
             if sig_ != drawn[0]:
                 t0_ = time.time(); scr.erase()
@@ -2018,6 +2080,10 @@ def manager():
                 if bc["focus"]:
                     curses.curs_set(1)
                     try: scr.move(py, len(pfx))
+                    except curses.error: pass
+                elif ed["cur"]:
+                    curses.curs_set(1)
+                    try: scr.move(*(ed["cur"] or (py, 1)))
                     except curses.error: pass
                 else: curses.curs_set(0)
                 scr.refresh(); drawn[0] = sig_
@@ -2037,7 +2103,7 @@ def manager():
             if not fw.ok: dl_.append(now_ + 2.0)                                                    # no kqueue: old reload stat
             if any(n_ for n_ in fw_hit) or hev.dirty.is_set(): dl_.append(now_)
             wait_ = max(0.0, min(dl_) - now_) if dl_ else None
-            if state_file: open(state_file, "w").write(f"{sel} focus={bc['focus']} help={show_help[0]}")
+            if state_file: open(state_file, "w").write(f"{sel} focus={bc['focus']} help={show_help[0]} rename={ed['on']}")
             if os.environ.get("HERD_TEST_KEYLOG"): open(os.environ["HERD_TEST_KEYLOG"], "a").write(f"{k_last[0]}\n")
             if os.environ.get("HERD_TEST_DUMP"):
                 dp = os.environ["HERD_TEST_DUMP"]
@@ -2091,6 +2157,32 @@ def manager():
             if k != -1: k_last[0] = k
             if k == -1: continue
             if k == curses.KEY_RESIZE: continue
+            if ed["on"]:                                               # R field active: keys edit the name, never commands
+                if k == curses.KEY_MOUSE:
+                    try: curses.getmouse()
+                    except curses.error: pass
+                    continue
+                ek_ = edit_key(k)
+                if ek_ == "cancel": ed["on"] = False; msg = "rename cancelled"
+                elif ek_ == "save":
+                    ed["on"] = False; old_ = ed["orig"]
+                    try:
+                        nm_, what_ = rename_ws(ed["wsid"], ed["buf"])
+                        _herd_log(f"rename {old_} -> {nm_} ({what_})")
+                        msg = {"renamed": f"renamed {old_} -> {nm_}", "reset": f"{old_}: default name {nm_}",
+                               "unchanged": f"{nm_}: name unchanged"}[what_]
+                        if nm_ != old_:                                    # carry name-keyed manager state along
+                            for r_ in rows:
+                                if r_.get("wsid") == ed["wsid"]: r_["name"] = nm_
+                            if old_ in att_on: att_on[nm_] = att_on.pop(old_)
+                            chime_st["blk"] = {nm_ if n_ == old_ else n_ for n_ in chime_st["blk"]}
+                            if zs["name"] == old_: zs["name"] = nm_
+                            if nz["name"] == old_: nz["name"] = nm_
+                            if sel_seen[0] == old_: sel_seen[0] = nm_
+                        last = 0
+                    except SystemExit as e: msg = f"! {e}"
+                    except Exception as e: msg = f"! {e}"
+                continue
             do_open = False
             if k == curses.KEY_MOUSE:
                 try: _, mx, my, _, bs = curses.getmouse()
@@ -2160,6 +2252,9 @@ def manager():
                     msg = group_focus(gf)
                     gf["behind"] = not gf["on"]; gf["t"] = time.time()
                     sel_seen[0] = None                                 # outline re-follows (or hides while behind)
+                elif ch == "R" and rows and rows[sel].get("wsid"):        # inline rename field, prefilled
+                    show_help[0] = False
+                    ed.update(on=True, wsid=rows[sel]["wsid"], orig=cur, buf=cur, pos=len(cur), raw=b""); msg = ""
                 elif ch == "Z" and cur:
                     if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
                     msg = mgr_zoom(cur, outline); last = 0; sel_seen[0] = None

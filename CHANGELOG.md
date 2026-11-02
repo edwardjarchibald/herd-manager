@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.33 - 2026-11-02
+
+### Added
+- Manager `R`: rename the selected session inline. The row becomes a text field prefilled with the current name (cursor at the end); Enter saves, Esc (or Ctrl-C) cancels, ←/→, Home/End, Ctrl-A/E, Backspace/Delete, Ctrl-U/Ctrl-K edit. While the field is open every key goes to it (uppercase command letters, `?`, mouse clicks/wheel do nothing else). The bottom line shows `rename: Enter save, Esc cancel, empty = default name`, then the result (`renamed a -> b`, `a: default name dev-3`, `x: name unchanged`, or `! 'x' already exists` / invalid characters). Listed in the `?` help.
+- `rename_ws(workspace_id, name)`: the rename is keyed by the herdr workspace id, not the name. The display name is the herdr workspace label (`herdr workspace rename`), so herdr keeps it across manager restarts; `names.json` marks it manual so automatic naming (dev-N / ee-<issue>) leaves it alone, and the window record (keyed by terminal id) and the window's title follow. An empty name drops the manual mark and runs one automatic-naming pass (the session gets its dev-N / <prefix>-<issue> name back); the unchanged name is a no-op (an automatic name is not pinned). `herd rename <old> <new>` now uses the same function. Name-keyed manager state (attention, blocked chime, zoom, outline) is carried to the new name, so renaming a blocked session does not chime.
+- Sandbox (`HERD_TEST_SANDBOX`) rows have fake workspace ids and can be renamed; `HERD_TEST_STATE` adds `rename=True|False`.
+
 ## 0.6.32 - 2026-11-01
 
 ### Fixed
