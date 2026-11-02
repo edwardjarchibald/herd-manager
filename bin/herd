@@ -64,6 +64,7 @@ CFG_DEFAULTS = {   # key: (default, env override or None, description)
     "chime_sound":         (os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "assets", "chime.wav"), None, "sound file for the blocked chime (default: herd's synthesized glass chime assets/chime.wav, rendered by assets/chime.py; any afplay-able file works, e.g. /System/Library/Sounds/Tink.aiff)"),
     "chime_volume":        (0.15,  None, "afplay volume 0-1 for the blocked chime (relative; the system volume is never changed)"),
     "blocked_outline_rgb": ("255 135 0", None, "colour 'r g b' (0-255) of the outline around every session window herdr reports blocked (attention_highlight on; default orange #ff8700); non-zoomed ones hidden under the zoom scrim. (Replaces attention_outline_rgb, which is no longer read)"),
+    "sort_sessions":       ("name", None, "manager row order: name = alphabetical by display name (case-insensitive, natural: dev-2 before dev-10; ties by herdr workspace id), re-sorted after renames and as sessions come and go; herdr = herdr's own workspace order (creation)"),
     "working_outline_rgb": ("0 175 175", None, "colour 'r g b' (0-255) of the outline around the selected/zoomed session's window while herdr reports it working/busy (attention_highlight on; default teal #00afaf)"),
 }
 
@@ -1060,6 +1061,15 @@ def app():
     if r.returncode: sys.exit(r.stderr)
     open_(r.stdout.split("\t")[0])
 
+def name_key(name, wsid=""):
+    """Natural, case-insensitive sort key: dev-2 < dev-10 < Edward < ee-3; ties by workspace id."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name.casefold())], wsid
+
+def sort_rows(rows):
+    """Manager row order (config sort_sessions): 'name' (default) = name_key(); 'herdr' = as herdr lists them."""
+    if cfg("sort_sessions").strip().lower() == "herdr": return rows
+    return sorted(rows, key=lambda r: name_key(r["name"], r.get("wsid") or ""))
+
 def sessions():
     """All herdr workspaces as rows for the manager."""
     ws = workspaces(); ps = panes()
@@ -1800,7 +1810,7 @@ def manager():
             if body.endswith("~"): return CSI_MAP.get(body.split(";")[0])
             return CSI_MAP.get(body[-1:])                               # A/B/C/D/H/F (modifiers ignored)
         bc = {"focus": False, "echo": "", "n": 0}
-        _herd_log(f"manager start pid={os.getpid()} version=0.6.33 (R: inline rename field; dock: regular frontmost-app windows only, dock.log; focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
+        _herd_log(f"manager start pid={os.getpid()} version=0.6.34 (rows sorted: sort_sessions={cfg('sort_sessions')}; R: inline rename field, prefill selected; dock: regular frontmost-app windows only, dock.log; focus guard + selection follows session; event-woken loop, select=zoom only, dblclick/N/O/Z focus, overlays on the herd Space only, blocked=orange busy=teal selected=white)")
         _herd_log(f"colours: blocked row={BLOCKED_256} outline={cfg('blocked_outline_rgb')!r}; busy row={WORKING_256} outline={cfg('working_outline_rgb')!r}; selection outline={cfg('outline_rgb')!r}")
         att_on = {}                                                    # session -> latched attention key
         hev = HerdrEvents(); last_rl = [time.time()]; att_seq = [0]
@@ -1839,12 +1849,18 @@ def manager():
             try: v = scr.getstr(H - 1, min(len(q), W - 2), 40).decode().strip()
             except Exception: v = ""
             curses.noecho(); curses.curs_set(0); scr.timeout(0); drawn[0] = None; return v
-        ed = {"on": False, "wsid": None, "orig": "", "buf": "", "pos": 0, "raw": b"", "cur": None}   # R: inline rename field
+        ed = {"on": False, "wsid": None, "orig": "", "buf": "", "pos": 0, "raw": b"", "cur": None, "all": False}   # R: inline rename field; all = prefill selected
         def edit_key(k):
             """One key into the rename field. Returns 'save', 'cancel' or None. Nothing here is ever a command."""
             b_, p_ = ed["buf"], ed["pos"]
             if k in (27, 3): return "cancel"                                   # Esc (Ctrl-C too)
             if k in (10, 13, curses.KEY_ENTER): return "save"
+            if ed["all"]:                                                      # 0.6.34: prefilled name is selected
+                if k in (127, 8, curses.KEY_BACKSPACE, curses.KEY_DC, 21, 11):    # Backspace/Delete/Ctrl-U/K: clear it
+                    ed.update(buf="", pos=0, all=False); return None
+                if k in (curses.KEY_LEFT, curses.KEY_HOME, 1): ed.update(pos=0, all=False); return None     # deselect, keep text
+                if k in (curses.KEY_RIGHT, curses.KEY_END, 5): ed.update(pos=len(b_), all=False); return None
+                if not (32 <= k < 127 or 128 <= k < 256): return None
             if k in (127, 8, curses.KEY_BACKSPACE):
                 if p_: b_, p_ = b_[:p_ - 1] + b_[p_:], p_ - 1
             elif k == curses.KEY_DC: b_ = b_[:p_] + b_[p_ + 1:]
@@ -1861,6 +1877,7 @@ def manager():
                     if len(ed["raw"]) >= 4: ed["raw"] = b""
                     return None
                 ed["raw"] = b""
+                if ed["all"]: b_, p_, ed["all"] = "", 0, False                 # first character replaces the selected name
                 if len(b_) + len(t_) <= 120: b_, p_ = b_[:p_] + t_ + b_[p_:], p_ + len(t_)
             ed["buf"], ed["pos"] = b_, p_
             return None
@@ -1886,7 +1903,7 @@ def manager():
                 hev.take_status()                                       # superseded by this snapshot
                 try:
                     prev_ = rows[sel] if rows and 0 <= sel < len(rows) else None
-                    rows = sessions()
+                    rows = sort_rows(sessions())                         # 0.6.34: alphabetical (sort_sessions); selection follows below
                     if want_sel[0]:
                         sel = next((i for i, r in enumerate(rows) if r["name"] == want_sel[0]), sel); want_sel[0] = None
                     elif prev_:
@@ -2034,6 +2051,7 @@ def manager():
                     off_ = max(0, ed["pos"] - fw_ + 1); vis_ = ed["buf"][off_:off_ + fw_]
                     fput(y, 0, pre_, C(2) if r["window"] else 0)
                     fput(y, len(pre_), vis_.ljust(min(fw_, max(len(vis_) + 1, 20))), C(3) | curses.A_UNDERLINE)
+                    if ed["all"] and vis_: fput(y, len(pre_), vis_, C(3) | curses.A_REVERSE)   # selected prefill: reverse video
                     ed["cur"] = (y, len(pre_) + ed["pos"] - off_)
                     continue
                 attr = (C(2) if r["window"] else curses.A_NORMAL) | (curses.A_BOLD if idx == sel else 0)
@@ -2061,7 +2079,7 @@ def manager():
                 room = W - 1 - len(pfx) - (len(cue) + 1 if W - 1 - len(pfx) > len(cue) + 8 else 0)
                 fput(py, 0, pfx, curses.A_BOLD)
                 if room < W - 1 - len(pfx): fput(py, W - 1 - len(cue), cue, C(3))
-            elif ed["on"]: fput(py, 1, "rename: Enter save, Esc cancel, empty = default name"[:W - 2], C(3))
+            elif ed["on"]: fput(py, 1, ("rename: type to replace, \u2190/\u2192 edit, " if ed["all"] else "rename: ") + "Enter save, Esc cancel, empty = default name"[:W - 2], C(3))
             elif msg: fput(py, 1, msg[:W - 2], C(5) if msg.startswith("!") else C(3))
             else: fput(py, 0, pfx + "click for broadcast", curses.A_DIM)
             if show_help[0]:                             # hints overlay: centered box over the list
@@ -2254,7 +2272,7 @@ def manager():
                     sel_seen[0] = None                                 # outline re-follows (or hides while behind)
                 elif ch == "R" and rows and rows[sel].get("wsid"):        # inline rename field, prefilled
                     show_help[0] = False
-                    ed.update(on=True, wsid=rows[sel]["wsid"], orig=cur, buf=cur, pos=len(cur), raw=b""); msg = ""
+                    ed.update(on=True, wsid=rows[sel]["wsid"], orig=cur, buf=cur, pos=len(cur), raw=b"", all=True); msg = ""
                 elif ch == "Z" and cur:
                     if hidden[0]: hidden[0] = False; set_sessions_visible(True)   # unhide first
                     msg = mgr_zoom(cur, outline); last = 0; sel_seen[0] = None

@@ -114,6 +114,7 @@ defaults; env vars, where listed, override the file. Changes apply on the next r
 | `blocked_color_256` | `208` | | Blocked-row background (xterm-256 index; 208 = #ff8700 orange) |
 | `blocked_outline_rgb` | `"255 135 0"` | | Outline colour of blocked sessions' windows (replaces `attention_outline_rgb`, no longer read) |
 | `working_outline_rgb` | `"0 175 175"` | | Outline colour of the selected/zoomed window while its session is busy |
+| `sort_sessions` | `"name"` | | Manager row order. `name`: alphabetical by display name, case-insensitive and natural (`dev-2` before `dev-10`), ties by herdr workspace id; re-sorted after an `R` rename and as sessions come and go, the selection stays on the same session. `herdr`: herdr's own workspace order (creation) |
 | `outline` | `true` | `HERD_NO_OUTLINE=1` disables | Outline around the selected session's window |
 | `outline_rgb` | `"255 255 255"` | `HERD_OUTLINE_RGB` | Selection outline colour (white) |
 | `outline_px` | `6` | `HERD_OUTLINE_PX` | Outline thickness |
@@ -124,7 +125,7 @@ state carried across manager reloads. None of them are settings.
 
 ### Manager keys
 
-Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the help overlay. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window gets the largest font up to 16 that fits every session on one line.
+Sessions are listed alphabetically (natural, case-insensitive; config `sort_sessions`). Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, plus `?` for the help overlay. The manager has no header or permanent hints: just the session list, a divider and one broadcast/status line. In dock mode its window gets the largest font up to 16 that fits every session on one line.
 
 | Key | Action |
 |---|---|
@@ -133,7 +134,7 @@ Commands are uppercase on purpose; lowercase letters do nothing except `j`/`k`, 
 | `O` | Toggle: open the session's window (tiled, without activating Terminal; the manager keeps focus), or, if it has one, detach and close it (the session keeps running) |
 | `N` | New session and window (also without activating Terminal) |
 | `Z` | Zoom toggle: raise the selected window (without activating Terminal) and size it to ~80% of the grid area, centered. Retiles keep it zoomed; Z again, or Z on another session, unzooms |
-| `R` | Rename the selected session: its row turns into a text field prefilled with the current name. Enter saves, Esc cancels; while the field is open every key is text (no commands). The name becomes the session's display name everywhere herd shows it (manager row, window title, `herd ls`, commands that take a name) and sticks like `herd rename`. An empty name returns the session to its automatic name. Editing: ←/→, Home/End (Ctrl-A/E), Backspace/Delete, Ctrl-U/Ctrl-K |
+| `R` | Rename the selected session: its row turns into a text field prefilled with the current name, shown selected (reverse video): the first character typed replaces the whole name, Backspace/Delete clear it, ←/→/Home/End deselect it and keep it for editing. Enter saves (Enter with no edit = unchanged), Esc cancels; while the field is open every key is text (no commands). The name becomes the session's display name everywhere herd shows it (manager row, window title, `herd ls`, commands that take a name) and sticks like `herd rename`. An empty name returns the session to its automatic name. Editing: ←/→, Home/End (Ctrl-A/E), Backspace/Delete, Ctrl-U/Ctrl-K |
 | `K` | Kill the selected session (no prompt) |
 | `A` | Kill **all** sessions (asks y/N) |
 | `?` | Toggle the help overlay (Esc also closes it) |

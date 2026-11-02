@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.34 - 2026-11-02
+
+### Added
+- Manager rows are sorted alphabetically by display name: case-insensitive, natural order (`dev-2` before `dev-10`, `ee-999` before `ee-1218`), ties by herdr workspace id (`name_key()`, `sort_rows()`). Every full refresh re-sorts, so an `R` rename, a `herd rename`, an automatic rename (cwd/branch change), a new session and a closed one all land in place; the selection follows the session (workspace id), not the row index. Status-only updates don't change names and keep the order.
+- Config `sort_sessions` (default `"name"`; `"herdr"` = herdr's own workspace order, the previous behaviour). Written to `config.json` with its `_doc` line.
+- Nothing else used manager row order: there are no number keys, clicks map to the drawn row, N/O and the manager-reload selection go by name. Window tiling/zoom keeps its own order (window creation time, newest window picks the display) and is unchanged, so renaming a session never moves windows.
+
+### Changed
+- `R` rename field: the prefilled name starts selected and is shown in reverse video. The first printable character replaces the whole name; Backspace, Delete, Ctrl-U or Ctrl-K clear it; ←/Home/Ctrl-A and →/End/Ctrl-E deselect it (cursor to the start / end) and keep the text for editing. Enter with no edit is still "unchanged", Esc still cancels. The bottom hint reads `rename: type to replace, ←/→ edit, Enter save, Esc cancel, empty = default name` while the name is selected.
+
 ## 0.6.33 - 2026-11-02
 
 ### Added
